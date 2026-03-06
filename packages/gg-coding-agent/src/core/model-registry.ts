@@ -108,3 +108,21 @@ export function getContextWindow(modelId: string): number {
   const model = getModel(modelId);
   return model?.contextWindow ?? 200_000;
 }
+
+/**
+ * Get the model to use for compaction summarization.
+ * - Anthropic: always Sonnet 4.6
+ * - OpenAI: cheapest (Codex Mini)
+ * - GLM / Moonshot: use the current model (no cheap alternative)
+ */
+export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
+  if (provider === "anthropic") {
+    return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
+  }
+  if (provider === "openai") {
+    const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
+    if (low) return low;
+  }
+  // GLM, Moonshot, or fallback: use current model
+  return getModel(currentModelId) ?? getDefaultModel(provider);
+}

@@ -1,0 +1,94 @@
+import React, { useState, useEffect } from "react";
+import { Text, Box } from "ink";
+import { useTheme } from "../theme/theme.js";
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+const ACCENT_COLOR = "#fbbf24"; // warning/amber
+
+function formatTokenCount(n: number): string {
+  if (n >= 1000) {
+    const k = n / 1000;
+    return k >= 10 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`;
+  }
+  return String(n);
+}
+
+// ── In-progress (animated spinner) ──────────────────────
+
+export function CompactionSpinner() {
+  const theme = useTheme();
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setFrame((f) => (f + 1) % SPINNER_FRAMES.length);
+    }, 80);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <Box marginTop={1}>
+      <Box
+        borderStyle="single"
+        borderLeft
+        borderRight={false}
+        borderTop={false}
+        borderBottom={false}
+        borderLeftColor={ACCENT_COLOR}
+        paddingLeft={1}
+      >
+        <Text color={ACCENT_COLOR}>{SPINNER_FRAMES[frame]} </Text>
+        <Text color={theme.textMuted} italic>
+          Compacting conversation
+        </Text>
+        <Text color={theme.textDim}>...</Text>
+      </Box>
+    </Box>
+  );
+}
+
+// ── Completed result ────────────────────────────────────
+
+interface CompactionDoneProps {
+  originalCount: number;
+  newCount: number;
+  tokensBefore: number;
+  tokensAfter: number;
+}
+
+export function CompactionDone({
+  originalCount,
+  newCount,
+  tokensBefore,
+  tokensAfter,
+}: CompactionDoneProps) {
+  const theme = useTheme();
+  const reduction = tokensBefore > 0 ? Math.round((1 - tokensAfter / tokensBefore) * 100) : 0;
+
+  return (
+    <Box marginTop={1}>
+      <Box
+        borderStyle="single"
+        borderLeft
+        borderRight={false}
+        borderTop={false}
+        borderBottom={false}
+        borderLeftColor={ACCENT_COLOR}
+        paddingLeft={1}
+        flexDirection="column"
+      >
+        <Box>
+          <Text color={ACCENT_COLOR}>{"⟳ "}</Text>
+          <Text color={theme.textMuted}>Conversation compacted</Text>
+        </Box>
+        <Box marginLeft={2}>
+          <Text color={theme.textDim}>
+            {originalCount} → {newCount} messages · {formatTokenCount(tokensBefore)} →{" "}
+            {formatTokenCount(tokensAfter)} tokens · {reduction}% reduction
+          </Text>
+        </Box>
+      </Box>
+    </Box>
+  );
+}

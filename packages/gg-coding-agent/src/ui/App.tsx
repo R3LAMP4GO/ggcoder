@@ -17,6 +17,7 @@ import { AssistantMessage } from "./components/AssistantMessage.js";
 import { ToolExecution } from "./components/ToolExecution.js";
 import { ServerToolExecution } from "./components/ServerToolExecution.js";
 import { SubAgentPanel, type SubAgentInfo } from "./components/SubAgentPanel.js";
+import { CompactionSpinner, CompactionDone } from "./components/CompactionNotice.js";
 import type { SubAgentUpdate, SubAgentDetails } from "../tools/subagent.js";
 import { StreamingArea } from "./components/StreamingArea.js";
 import { ActivityIndicator } from "./components/ActivityIndicator.js";
@@ -29,10 +30,12 @@ import type { ProcessManager, BackgroundProcess } from "../core/process-manager.
 import { useTheme } from "./theme/theme.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
-import { getModel } from "../core/model-registry.js";
+import { getModel, getContextWindow } from "../core/model-registry.js";
 import { SessionManager, type MessageEntry } from "../core/session-manager.js";
 import { log } from "../core/logger.js";
 import { SettingsManager } from "../core/settings-manager.js";
+import { shouldCompact, compact } from "../core/compaction/compactor.js";
+import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 
 // ── Completed Item Types ───────────────────────────────────
 
@@ -78,6 +81,20 @@ interface ErrorItem {
 interface InfoItem {
   kind: "info";
   text: string;
+  id: string;
+}
+
+interface CompactingItem {
+  kind: "compacting";
+  id: string;
+}
+
+interface CompactedItem {
+  kind: "compacted";
+  originalCount: number;
+  newCount: number;
+  tokensBefore: number;
+  tokensAfter: number;
   id: string;
 }
 
@@ -127,6 +144,8 @@ export type CompletedItem =
   | ServerToolDoneItem
   | ErrorItem
   | InfoItem
+  | CompactingItem
+  | CompactedItem
   | DurationItem
   | BannerItem
   | SubAgentGroupItem;
@@ -275,6 +294,98 @@ export function App(props: AppProps) {
     persistedIndexRef.current = allMsgs.length;
   }, [props.sessionPath]);
 
+  // ── Compaction ─────────────────────────────────────────
+
+  // Load settings for auto-compaction
+  const settingsRef = useRef<SettingsManager | null>(null);
+  useEffect(() => {
+    if (props.settingsFile) {
+      const sm = new SettingsManager(props.settingsFile);
+      sm.load().then(() => {
+        settingsRef.current = sm;
+      });
+    }
+  }, [props.settingsFile]);
+
+  const compactConversation = useCallback(
+    async (messages: Message[]): Promise<Message[]> => {
+      const contextWindow = getContextWindow(currentModel);
+      const tokensBefore = estimateConversationTokens(messages);
+      const spinId = getId();
+      log("INFO", "compaction", `Running compaction`, {
+        messages: String(messages.length),
+        estimatedTokens: String(tokensBefore),
+        contextWindow: String(contextWindow),
+      });
+
+      // Show animated spinner
+      setLiveItems((prev) => [...prev, { kind: "compacting", id: spinId }]);
+
+      try {
+        const result = await compact(messages, {
+          provider: currentProvider,
+          model: currentModel,
+          apiKey: activeApiKey,
+          contextWindow,
+          signal: undefined,
+        });
+
+        // Replace spinner with completed notice
+        setLiveItems((prev) =>
+          prev.map((item) =>
+            item.id === spinId
+              ? ({
+                  kind: "compacted",
+                  originalCount: result.result.originalCount,
+                  newCount: result.result.newCount,
+                  tokensBefore: result.result.tokensBeforeEstimate,
+                  tokensAfter: result.result.tokensAfterEstimate,
+                  id: spinId,
+                } as CompactedItem)
+              : item,
+          ),
+        );
+
+        return result.messages;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log("ERROR", "compaction", `Compaction failed: ${msg}`);
+        // Replace spinner with error
+        setLiveItems((prev) =>
+          prev.map((item) =>
+            item.id === spinId
+              ? ({ kind: "error", message: `Compaction failed: ${msg}`, id: spinId } as ErrorItem)
+              : item,
+          ),
+        );
+        return messages; // Return unchanged on failure
+      }
+    },
+    [currentModel, currentProvider, activeApiKey],
+  );
+
+  /**
+   * transformContext callback for the agent loop.
+   * Called before each LLM call and on context overflow.
+   * Checks if auto-compaction is needed and runs it.
+   */
+  const transformContext = useCallback(
+    async (messages: Message[]): Promise<Message[]> => {
+      const settings = settingsRef.current;
+      const autoCompact = settings?.get("autoCompact") ?? true;
+      const threshold = settings?.get("compactThreshold") ?? 0.8;
+
+      if (!autoCompact) return messages;
+
+      const contextWindow = getContextWindow(currentModel);
+      if (shouldCompact(messages, contextWindow, threshold)) {
+        return compactConversation(messages);
+      }
+      return messages;
+    },
+    [currentModel, compactConversation],
+  );
+
   // ── Background task bar state ───────────────────────────
   const [bgTasks, setBgTasks] = useState<BackgroundProcess[]>([]);
   const [taskBarFocused, setTaskBarFocused] = useState(false);
@@ -350,6 +461,7 @@ export function App(props: AppProps) {
       apiKey: activeApiKey,
       baseUrl: props.baseUrl,
       accountId: activeAccountId,
+      transformContext,
     },
     {
       onComplete: useCallback(() => {
@@ -622,6 +734,16 @@ export function App(props: AppProps) {
         return;
       }
 
+      // Handle /compact — compact conversation
+      if (trimmed === "/compact" || trimmed === "/c") {
+        const compacted = await compactConversation(messagesRef.current);
+        if (compacted !== messagesRef.current) {
+          messagesRef.current = compacted;
+          persistedIndexRef.current = 0; // Re-persist after compaction
+        }
+        return;
+      }
+
       // Handle /clear — reset session
       if (trimmed === "/clear") {
         setHistory([]);
@@ -696,7 +818,7 @@ export function App(props: AppProps) {
         ]);
       }
     },
-    [agentLoop, props.onSlashCommand],
+    [agentLoop, props.onSlashCommand, compactConversation],
   );
 
   const handleAbort = useCallback(() => {
@@ -816,6 +938,18 @@ export function App(props: AppProps) {
           <Box key={item.id} marginTop={1}>
             <Text color={theme.textDim}>{item.text}</Text>
           </Box>
+        );
+      case "compacting":
+        return <CompactionSpinner key={item.id} />;
+      case "compacted":
+        return (
+          <CompactionDone
+            key={item.id}
+            originalCount={item.originalCount}
+            newCount={item.newCount}
+            tokensBefore={item.tokensBefore}
+            tokensAfter={item.tokensAfter}
+          />
         );
       case "duration":
         return (

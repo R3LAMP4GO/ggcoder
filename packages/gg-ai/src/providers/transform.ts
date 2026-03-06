@@ -70,7 +70,7 @@ export function toAnthropicMessages(
           : msg.content.map((part): Anthropic.ContentBlockParam => {
               if (part.type === "text") return { type: "text", text: part.text };
               if (part.type === "thinking")
-                return { type: "thinking", thinking: part.text, signature: "" };
+                return { type: "thinking", thinking: part.text, signature: part.signature ?? "" };
               if (part.type === "tool_call")
                 return {
                   type: "tool_use",

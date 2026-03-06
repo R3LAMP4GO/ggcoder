@@ -220,6 +220,11 @@ export async function* agentLoop(
       return { toolCallId: toolCall.id, content: resultContent, isError };
     });
 
+    // Abort the tool event stream when the signal fires so Ctrl+C
+    // doesn't hang waiting for long-running tools to finish.
+    const abortHandler = () => eventStream.abort(new Error("aborted"));
+    options.signal?.addEventListener("abort", abortHandler, { once: true });
+
     // Close event stream when all tools complete
     Promise.all(executions)
       .then((results) => {
@@ -237,8 +242,12 @@ export async function* agentLoop(
       .catch((err) => eventStream.abort(err instanceof Error ? err : new Error(String(err))));
 
     // Yield events as they arrive from parallel tools
-    for await (const event of eventStream) {
-      yield event;
+    try {
+      for await (const event of eventStream) {
+        yield event;
+      }
+    } finally {
+      options.signal?.removeEventListener("abort", abortHandler);
     }
 
     // Push tool results back into conversation

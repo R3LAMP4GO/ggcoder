@@ -72,6 +72,11 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
         mode: "enabled",
         flags: ["disambiguateEscapeCodes"],
       },
+      // Ink's built-in exitOnCtrlC checks for the raw \x03 byte, but with
+      // kitty keyboard protocol Ctrl+C arrives as \x1b[99;5u so the check
+      // never matches. Worse, useInput skips calling our handler when
+      // exitOnCtrlC is true. Disable it so our InputArea handles Ctrl+C.
+      exitOnCtrlC: false,
     },
   );
 

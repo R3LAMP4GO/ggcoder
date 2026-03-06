@@ -22,6 +22,7 @@ export interface TextContent {
 export interface ThinkingContent {
   type: "thinking";
   text: string;
+  signature?: string;
 }
 
 export interface ImageContent {

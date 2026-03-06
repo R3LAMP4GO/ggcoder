@@ -125,7 +125,7 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
     if (block.type === "text") {
       contentParts.push({ type: "text", text: block.text });
     } else if (block.type === "thinking") {
-      contentParts.push({ type: "thinking", text: block.thinking });
+      contentParts.push({ type: "thinking", text: block.thinking, signature: block.signature });
     } else if (block.type === "tool_use") {
       const tc: ToolCall = {
         type: "tool_call",

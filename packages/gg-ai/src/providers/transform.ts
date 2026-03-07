@@ -97,19 +97,15 @@ export function toAnthropicMessages(
       continue;
     }
     if (msg.role === "tool") {
-      for (const result of msg.content) {
-        out.push({
-          role: "user",
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: result.toolCallId,
-              content: result.content,
-              is_error: result.isError,
-            },
-          ],
-        });
-      }
+      out.push({
+        role: "user",
+        content: msg.content.map((result) => ({
+          type: "tool_result" as const,
+          tool_use_id: result.toolCallId,
+          content: result.content,
+          is_error: result.isError,
+        })),
+      });
     }
   }
 
@@ -179,7 +175,7 @@ export function toAnthropicTools(tools: Tool[]): Anthropic.Tool[] {
 
 export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice {
   if (choice === "auto") return { type: "auto" };
-  if (choice === "none") return { type: "auto" }; // Anthropic has no "none" — omit tools instead
+  if (choice === "none") return { type: "none" };
   if (choice === "required") return { type: "any" };
   return { type: "tool", name: choice.name };
 }

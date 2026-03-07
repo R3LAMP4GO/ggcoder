@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { Box, Text, Static, useStdout } from "ink";
+import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import crypto from "node:crypto";
 import type {
   Message,
@@ -232,6 +233,7 @@ export interface AppProps {
 export function App(props: AppProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
+  const { resizeKey } = useTerminalSize();
 
   // Terminal title — updated later after agentLoop is created
   // (hoisted here so the hook is always called in the same order)
@@ -1058,8 +1060,15 @@ export function App(props: AppProps) {
           width="100%" is required because Static uses position:absolute internally,
           which causes auto-width resolution to shrink-wrap content. Without it,
           children using flexGrow+flexBasis=0 (like AssistantMessage) collapse to
-          near-zero width and text wraps at ~3 chars. */}
-      <Static items={history} style={{ width: "100%" }}>
+          near-zero width and text wraps at ~3 chars.
+
+          resizeKey forces a full remount after terminal resize settles (300ms
+          debounce). This is the only way to make Ink re-print <Static> items —
+          Ink tracks rendered items by key and won't re-render them otherwise,
+          so reflowed/corrupted scrollback content persists. The useTerminalSize
+          hook clears the screen+scrollback before bumping resizeKey, giving
+          Ink a clean slate to re-render into. */}
+      <Static key={resizeKey} items={history} style={{ width: "100%" }}>
         {(item) => renderItem(item)}
       </Static>
 

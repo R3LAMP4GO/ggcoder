@@ -92,13 +92,12 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     },
   );
 
-  // Ink's built-in resize handler only clears the live area on terminal
-  // shrink, not grow. After any resize, terminal text reflow makes Ink's
-  // line-count-based erasing miss old content, leaving ghost duplicates.
-  // Also update the scroll margin so the pinned row 1 survives resizes.
+  // Resize handling (terminal clear + scroll region reset + Static remount)
+  // is done inside the React tree via the useTerminalSize hook, which
+  // debounces 300ms then clears screen+scrollback and bumps a resizeKey
+  // to force Ink to re-render <Static> content.  The render.ts layer only
+  // needs to call clear() so Ink forgets its stale line-count tracking.
   const onResize = () => {
-    const newRows = process.stdout.rows ?? 24;
-    process.stdout.write(`\x1b[2;${newRows}r`);
     clear();
   };
   process.stdout.on("resize", onResize);

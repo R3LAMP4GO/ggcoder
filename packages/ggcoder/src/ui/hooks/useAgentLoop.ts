@@ -45,7 +45,10 @@ export interface AgentLoopOptions {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
-  transformContext?: (messages: Message[]) => Message[] | Promise<Message[]>;
+  transformContext?: (
+    messages: Message[],
+    options?: { force?: boolean },
+  ) => Message[] | Promise<Message[]>;
 }
 
 export type ActivityPhase = "waiting" | "thinking" | "generating" | "tools" | "idle";

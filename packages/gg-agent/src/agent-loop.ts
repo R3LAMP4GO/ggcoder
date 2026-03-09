@@ -18,7 +18,7 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 
-const DEFAULT_MAX_TURNS = 40;
+const DEFAULT_MAX_TURNS = 100;
 
 /**
  * Detect context window overflow errors from LLM providers.
@@ -47,7 +47,8 @@ export async function* agentLoop(
   const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   let turn = 0;
   let consecutivePauses = 0;
-  let overflowRetried = false;
+  let overflowRetries = 0;
+  const MAX_OVERFLOW_RETRIES = 3;
 
   while (turn < maxTurns) {
     options.signal?.throwIfAborted();
@@ -110,10 +111,14 @@ export async function* agentLoop(
 
       response = await result.response;
     } catch (err) {
-      // Context overflow: compact via transformContext and retry once
-      if (!overflowRetried && isContextOverflow(err) && options.transformContext) {
-        overflowRetried = true;
-        const transformed = await options.transformContext(messages);
+      // Context overflow: force-compact via transformContext and retry (up to 3 times)
+      if (
+        overflowRetries < MAX_OVERFLOW_RETRIES &&
+        isContextOverflow(err) &&
+        options.transformContext
+      ) {
+        overflowRetries++;
+        const transformed = await options.transformContext(messages, { force: true });
         if (transformed !== messages) {
           messages.length = 0;
           messages.push(...transformed);
@@ -124,8 +129,8 @@ export async function* agentLoop(
       throw err;
     }
 
-    // Reset overflow flag after successful call
-    overflowRetried = false;
+    // Reset overflow counter after successful call
+    overflowRetries = 0;
 
     // Accumulate usage
     totalUsage.inputTokens += response.usage.inputTokens;

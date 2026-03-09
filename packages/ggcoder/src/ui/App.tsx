@@ -495,10 +495,15 @@ export function App(props: AppProps) {
    * Checks if auto-compaction is needed and runs it.
    */
   const transformContext = useCallback(
-    async (messages: Message[]): Promise<Message[]> => {
+    async (messages: Message[], options?: { force?: boolean }): Promise<Message[]> => {
       const settings = settingsRef.current;
       const autoCompact = settings?.get("autoCompact") ?? true;
       const threshold = settings?.get("compactThreshold") ?? 0.8;
+
+      // Force-compact on context overflow regardless of settings
+      if (options?.force) {
+        return compactConversation(messages);
+      }
 
       if (!autoCompact) return messages;
 

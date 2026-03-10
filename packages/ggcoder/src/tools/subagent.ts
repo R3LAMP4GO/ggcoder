@@ -3,7 +3,8 @@ import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { AgentDefinition } from "../core/agents.js";
-import { getExploreModel } from "../core/builtin-agents.js";
+import type { Skill } from "../core/skills.js";
+import { getExploreModel, applyCommonSuffix } from "../core/builtin-agents.js";
 import { truncateTail } from "./truncate.js";
 
 const SUB_AGENT_MAX_TURNS = 10;
@@ -18,7 +19,8 @@ const SubAgentParams = z.object({
     .optional()
     .describe(
       'Named agent to use. Built-in: "explore" (fast read-only search), ' +
-        '"plan" (architecture/planning), "worker" (full-capability). ' +
+        '"plan" (architecture/planning), "worker" (full-capability), ' +
+        '"fork" (isolated worker for parallel task execution). ' +
         "Or a custom agent from ~/.gg/agents/ or .gg/agents/",
     ),
 });
@@ -35,11 +37,40 @@ export interface SubAgentDetails {
   durationMs: number;
 }
 
+/**
+ * Resolve skill names from an agent's `skills` field to actual Skill content,
+ * then format them for injection into the agent's system prompt.
+ */
+function resolvePreloadedSkills(skillNames: string[], availableSkills: Skill[]): string {
+  if (skillNames.length === 0 || availableSkills.length === 0) return "";
+
+  const skillMap = new Map(availableSkills.map((s) => [s.name.toLowerCase(), s]));
+  const resolved: Skill[] = [];
+
+  for (const name of skillNames) {
+    const skill = skillMap.get(name.toLowerCase());
+    if (skill) resolved.push(skill);
+  }
+
+  if (resolved.length === 0) return "";
+
+  const parts = ["\n\n## Preloaded Skills\n"];
+  for (const skill of resolved) {
+    parts.push(`### ${skill.name}${skill.description ? ` — ${skill.description}` : ""}`);
+    parts.push(skill.content);
+    parts.push("");
+  }
+  parts.push("Follow the conventions and patterns from the preloaded skills.\n");
+
+  return parts.join("\n");
+}
+
 export function createSubAgentTool(
   cwd: string,
   agents: AgentDefinition[],
   parentProvider: string,
   parentModel: string,
+  availableSkills?: Skill[],
 ): AgentTool<typeof SubAgentParams> {
   // Sub-sub-agent prevention: if we're already a subagent, return a tool
   // that always errors. This prevents infinite recursion.
@@ -65,9 +96,11 @@ export function createSubAgentTool(
       `- Parallel execution: spawn multiple agents for independent tasks\n` +
       `- Isolation: keep large outputs out of main context\n\n` +
       `Built-in agents:\n` +
-      `- explore: Fast, read-only codebase search (uses cheapest model)\n` +
+      `- explore: Fast, read-only codebase search (uses cheapest model). ` +
+      `Specify thoroughness: "quick", "medium", or "very thorough"\n` +
       `- plan: Software architect for implementation planning (read-only)\n` +
-      `- worker: Full-capability agent for complex multi-step tasks\n\n` +
+      `- worker: General-purpose agent for complex multi-step tasks\n` +
+      `- fork: Isolated worker for parallel task execution with structured output\n\n` +
       `Prefer "explore" for any file search, code search, or codebase questions.\n` +
       `Prefer spawning parallel agents when tasks are independent.` +
       agentDesc,
@@ -93,7 +126,23 @@ export function createSubAgentTool(
       }
       const useProvider = parentProvider;
 
+      // Build the system prompt:
+      // 1. Start with the agent's base system prompt
+      // 2. Inject preloaded skills if the agent has a `skills` field
+      // 3. Apply common suffix for subagent response format
+      let systemPrompt = agentDef?.systemPrompt ?? "";
+      if (systemPrompt) {
+        // Inject preloaded skills
+        if (agentDef?.skills && agentDef.skills.length > 0 && availableSkills) {
+          systemPrompt += resolvePreloadedSkills(agentDef.skills, availableSkills);
+        }
+
+        // Apply common suffix — subagents get concise report instructions
+        systemPrompt = applyCommonSuffix(systemPrompt, true);
+      }
+
       // Build CLI args — limit turns to prevent runaway context growth
+      const effectiveMaxTurns = agentDef?.maxTurns ?? SUB_AGENT_MAX_TURNS;
       const cliArgs: string[] = [
         "--json",
         "--provider",
@@ -101,11 +150,11 @@ export function createSubAgentTool(
         "--model",
         useModel,
         "--max-turns",
-        String(SUB_AGENT_MAX_TURNS),
+        String(effectiveMaxTurns),
       ];
 
-      if (agentDef?.systemPrompt) {
-        cliArgs.push("--system-prompt", agentDef.systemPrompt);
+      if (systemPrompt) {
+        cliArgs.push("--system-prompt", systemPrompt);
       }
 
       // Tool restrictions: if the agent has a specific tool list, enforce it

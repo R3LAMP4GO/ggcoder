@@ -10,6 +10,8 @@ export interface SlashCommandContext {
   setSetting: (key: string, value: unknown) => Promise<void>;
   getModelList: () => string;
   quit: () => void;
+  togglePlanMode?: (args?: string) => string;
+  getAgents?: () => { name: string; description: string; source: string; model?: string; tools: string[] }[];
 }
 
 export interface SlashCommand {
@@ -125,6 +127,35 @@ export function extractEmbedded(input: string, knownNames: Set<string>): Embedde
   return null;
 }
 
+// ── Bash Prefix (!) ───────────────────────────────────────
+
+/**
+ * Detect `!command` bash prefix — runs command directly.
+ * Returns the command string if detected, null otherwise.
+ */
+export function parseBashPrefix(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("!")) return null;
+  const command = trimmed.slice(1).trim();
+  return command || null;
+}
+
+// ── File Mentions (@) ─────────────────────────────────────
+
+/**
+ * Extract `@path/to/file` mentions from input.
+ * Returns array of file paths mentioned.
+ */
+export function extractFileMentions(input: string): string[] {
+  const regex = /(?:^|\s)@([\w./-]+)/g;
+  const mentions: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(input)) !== null) {
+    mentions.push(match[1]);
+  }
+  return mentions;
+}
+
 // ── Built-in Commands ──────────────────────────────────────
 
 export function createBuiltinCommands(): SlashCommand[] {
@@ -228,6 +259,45 @@ export function createBuiltinCommands(): SlashCommand[] {
       execute(_args, ctx) {
         ctx.quit();
         return "Goodbye!";
+      },
+    },
+    {
+      name: "plan",
+      aliases: [],
+      description: "Toggle plan mode (read-only planning with approval)",
+      usage: "/plan [task description]",
+      execute(args, ctx) {
+        if (!ctx.togglePlanMode) return "Plan mode is not available in this session.";
+        return ctx.togglePlanMode(args || undefined);
+      },
+    },
+    {
+      name: "agents",
+      aliases: [],
+      description: "List available agents",
+      usage: "/agents",
+      execute(_args, ctx) {
+        if (!ctx.getAgents) return "Agent listing is not available in this session.";
+        const agents = ctx.getAgents();
+        if (agents.length === 0) return "No agents configured.";
+
+        const groups: Record<string, typeof agents> = {};
+        for (const a of agents) {
+          const label = a.source === "global" ? "Built-in / User (~/.gg/agents/)" : "Project (.gg/agents/)";
+          (groups[label] ??= []).push(a);
+        }
+
+        const lines: string[] = ["Available agents:\n"];
+        for (const [group, items] of Object.entries(groups)) {
+          lines.push(`  ${group}:`);
+          for (const a of items) {
+            const model = a.model ? ` [${a.model}]` : "";
+            const tools = a.tools.length > 0 ? ` (${a.tools.join(", ")})` : " (all tools)";
+            lines.push(`    ${a.name}${model} — ${a.description}${tools}`);
+          }
+          lines.push("");
+        }
+        return lines.join("\n");
       },
     },
   ];

@@ -1,11 +1,18 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+export type PermissionMode = "default" | "acceptEdits" | "dontAsk" | "bypassPermissions" | "plan";
+
 export interface AgentDefinition {
   name: string;
   description: string;
   tools: string[];
+  disallowedTools?: string[];
   model?: string;
+  maxTurns?: number;
+  background?: boolean;
+  skills?: string[];
+  permissionMode?: PermissionMode;
   systemPrompt: string;
   source: "global" | "project";
 }
@@ -82,7 +89,12 @@ export function parseAgentFile(raw: string, source: "global" | "project"): Agent
   let name = "";
   let description = "";
   let tools: string[] = [];
+  let disallowedTools: string[] | undefined;
   let model: string | undefined;
+  let maxTurns: number | undefined;
+  let background: boolean | undefined;
+  let skills: string[] | undefined;
+  let permissionMode: PermissionMode | undefined;
   let systemPrompt = raw;
 
   if (raw.startsWith("---")) {
@@ -100,14 +112,26 @@ export function parseAgentFile(raw: string, source: "global" | "project"): Agent
         if (key === "name") name = value;
         else if (key === "description") description = value;
         else if (key === "tools") {
-          tools = value
-            .split(",")
-            .map((t) => t.trim())
-            .filter(Boolean);
+          tools = value.split(",").map((t) => t.trim()).filter(Boolean);
+        } else if (key === "disallowedtools" || key === "disallowed-tools") {
+          disallowedTools = value.split(",").map((t) => t.trim()).filter(Boolean);
         } else if (key === "model") model = value;
+        else if (key === "maxturns" || key === "max-turns") {
+          const parsed = parseInt(value, 10);
+          if (!isNaN(parsed) && parsed > 0) maxTurns = parsed;
+        } else if (key === "background") {
+          background = value.toLowerCase() === "true";
+        } else if (key === "skills") {
+          skills = value.split(",").map((s) => s.trim()).filter(Boolean);
+        } else if (key === "permissionmode" || key === "permission-mode") {
+          const validModes: PermissionMode[] = ["default", "acceptEdits", "dontAsk", "bypassPermissions", "plan"];
+          if (validModes.includes(value as PermissionMode)) {
+            permissionMode = value as PermissionMode;
+          }
+        }
       }
     }
   }
 
-  return { name, description, tools, model, systemPrompt, source };
+  return { name, description, tools, disallowedTools, model, maxTurns, background, skills, permissionMode, systemPrompt, source };
 }

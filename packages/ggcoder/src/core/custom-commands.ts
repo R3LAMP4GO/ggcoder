@@ -44,5 +44,8 @@ export async function loadCustomCommands(cwd: string): Promise<CustomCommand[]> 
     }
   }
 
-  return commands;
+  // Deduplicate by name (last file wins) to prevent duplicate React keys
+  const seen = new Map<string, CustomCommand>();
+  for (const cmd of commands) seen.set(cmd.name, cmd);
+  return [...seen.values()];
 }

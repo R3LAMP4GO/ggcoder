@@ -145,16 +145,22 @@ describe("checkPlanModeBlock", () => {
     expect(result).toContain("read-only");
   });
 
-  it("blocks all bash commands in planning state", () => {
-    expect(checkPlanModeBlock("bash", { command: "mkdir -p /tmp/foo" }, "planning")).toContain("not available");
-    expect(checkPlanModeBlock("bash", { command: "rm -rf /tmp" }, "planning")).toContain("not available");
-    expect(checkPlanModeBlock("bash", { command: "git add ." }, "planning")).toContain("not available");
-    expect(checkPlanModeBlock("bash", { command: "npm install express" }, "planning")).toContain("not available");
-    // Read-only commands are also blocked — bash is fully disabled in plan mode
-    expect(checkPlanModeBlock("bash", { command: "ls -la" }, "planning")).toContain("not available");
-    expect(checkPlanModeBlock("bash", { command: "cat foo.ts" }, "planning")).toContain("not available");
-    expect(checkPlanModeBlock("bash", { command: "git status" }, "planning")).toContain("not available");
-    expect(checkPlanModeBlock("bash", { command: "grep -rn 'foo' src/" }, "planning")).toContain("not available");
+  it("blocks write bash commands in planning state", () => {
+    expect(checkPlanModeBlock("bash", { command: "mkdir -p /tmp/foo" }, "planning")).toContain("read-only");
+    expect(checkPlanModeBlock("bash", { command: "rm -rf /tmp" }, "planning")).toContain("read-only");
+    expect(checkPlanModeBlock("bash", { command: "git add ." }, "planning")).toContain("read-only");
+    expect(checkPlanModeBlock("bash", { command: "npm install express" }, "planning")).toContain("read-only");
+  });
+
+  it("allows read-only bash commands in planning state", () => {
+    expect(checkPlanModeBlock("bash", { command: "ls -la" }, "planning")).toBeNull();
+    expect(checkPlanModeBlock("bash", { command: "cat foo.ts" }, "planning")).toBeNull();
+    expect(checkPlanModeBlock("bash", { command: "git status" }, "planning")).toBeNull();
+    expect(checkPlanModeBlock("bash", { command: "git log --oneline -10" }, "planning")).toBeNull();
+    expect(checkPlanModeBlock("bash", { command: "git diff HEAD~1" }, "planning")).toBeNull();
+    expect(checkPlanModeBlock("bash", { command: "grep -rn 'foo' src/" }, "planning")).toBeNull();
+    expect(checkPlanModeBlock("bash", { command: "head -20 package.json" }, "planning")).toBeNull();
+    expect(checkPlanModeBlock("bash", { command: "wc -l src/*.ts" }, "planning")).toBeNull();
   });
 
   it("allows read/grep/find/ls tools in planning state", () => {

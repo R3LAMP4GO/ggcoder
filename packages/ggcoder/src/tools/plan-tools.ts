@@ -48,7 +48,8 @@ export function createEnterPlanModeTool(
         "with your complete implementation plan.\n\n" +
         "Restrictions:\n" +
         "- Cannot write or edit files (except .gg/plans/)\n" +
-        "- Bash is completely unavailable — use read, grep, find, ls to explore"
+        "- Read-only bash is allowed (ls, cat, git log/diff/status, etc.)\n" +
+        "- Write operations are blocked (mkdir, rm, cp, mv, git add/commit, npm install, etc.)"
       );
     },
   };

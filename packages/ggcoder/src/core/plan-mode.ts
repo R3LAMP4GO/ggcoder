@@ -79,10 +79,72 @@ export function checkPlanModeBlock(
   }
 
   if (toolName === "bash") {
-    return "Plan mode is read-only. Bash commands are not available. Use read, grep, find, and ls to explore the codebase. Call exit_plan_mode when your plan is ready.";
+    const command = String(args.command ?? "").trim().toLowerCase();
+    // Allow read-only shell commands during plan mode
+    if (isReadOnlyBashCommand(command)) {
+      return null;
+    }
+    return "Plan mode is read-only. Only read-only bash commands are allowed (ls, cat, head, tail, find, grep, git status/log/diff/show/branch, wc, file, which, echo, pwd, tree, stat, du, df). Call exit_plan_mode when your plan is ready.";
   }
 
   return null;
+}
+
+// ── Read-only bash detection ──────────────────────────────
+
+/** Commands that are safe to run in plan mode (read-only). */
+const READ_ONLY_PREFIXES = [
+  "ls", "cat", "head", "tail", "find", "grep", "egrep", "fgrep", "rg",
+  "git status", "git log", "git diff", "git show", "git branch", "git tag",
+  "git remote", "git stash list", "git rev-parse", "git describe",
+  "wc", "file", "which", "where", "type", "echo", "printf", "pwd",
+  "env", "printenv", "tree", "stat", "du", "df", "uname", "hostname",
+  "date", "whoami", "id", "sort", "uniq", "cut", "awk", "sed -n",
+  "diff", "comm", "join", "nl", "od", "xxd", "hexdump", "strings",
+  "readlink", "realpath", "basename", "dirname", "test", "[",
+];
+
+/** Patterns that indicate a write/destructive operation. */
+const WRITE_PATTERNS = [
+  /\bmkdir\b/, /\btouch\b/, /\brm\b/, /\brmdir\b/, /\bcp\b/, /\bmv\b/,
+  /\bchmod\b/, /\bchown\b/, /\bchgrp\b/, /\bln\b/,
+  /\bgit add\b/, /\bgit commit\b/, /\bgit push\b/, /\bgit merge\b/,
+  /\bgit rebase\b/, /\bgit checkout\b/, /\bgit switch\b/, /\bgit reset\b/,
+  /\bgit cherry-pick\b/, /\bgit stash\s+(push|pop|drop|apply|save)\b/,
+  /\bnpm install\b/, /\bnpm ci\b/, /\byarn\s+(add|install)\b/,
+  /\bpnpm\s+(add|install)\b/, /\bbun\s+(add|install)\b/,
+  /\bpip install\b/, /\bcargo install\b/,
+  /\bsed\s+-i\b/, /\btee\b/,
+  /[^|]>/, />>/, /\bcurl\s.*-o\b/, /\bwget\b/,
+  /\bkill\b/, /\bpkill\b/, /\bkillall\b/,
+];
+
+/**
+ * Determine if a bash command is read-only (safe for plan mode).
+ * Uses a combination of prefix allowlist and write-pattern blocklist.
+ */
+function isReadOnlyBashCommand(command: string): boolean {
+  // Empty command — allow (harmless)
+  if (!command) return true;
+
+  // Check for explicit write patterns first (blocklist takes priority)
+  for (const pattern of WRITE_PATTERNS) {
+    if (pattern.test(command)) return false;
+  }
+
+  // If it's piped, check each segment
+  const segments = command.split(/\s*\|\s*/);
+  const firstSegment = segments[0].trim();
+
+  // Check if the first command starts with a known read-only prefix
+  for (const prefix of READ_ONLY_PREFIXES) {
+    if (firstSegment === prefix || firstSegment.startsWith(prefix + " ") || firstSegment.startsWith(prefix + "\t")) {
+      return true;
+    }
+  }
+
+  // Unknown command — block by default for safety
+  return false;
 }
 
 // ── System prompt injection ────────────────────────────────
@@ -164,7 +226,10 @@ The plan will be saved as a .md file in .gg/plans/ for reference.
 
 DO NOT: write files, edit files, run destructive commands, or start implementation.
 DO NOT: use ask_user_question for plan approval — that's what exit_plan_mode is for.
-DO NOT: use bash — it is completely blocked in plan mode.`;
+
+### Bash in plan mode
+Read-only bash commands ARE allowed: \`ls\`, \`cat\`, \`head\`, \`tail\`, \`find\`, \`grep\`, \`git status\`, \`git log\`, \`git diff\`, \`git show\`, \`git branch\`, \`wc\`, \`file\`, \`which\`, \`echo\`, \`pwd\`, \`tree\`, \`stat\`, \`du\`, \`df\`.
+Write operations are blocked: \`mkdir\`, \`touch\`, \`rm\`, \`cp\`, \`mv\`, \`git add/commit/push\`, \`npm/yarn/pnpm install\`, etc.`;
 
 // ── Implementation ─────────────────────────────────────────
 

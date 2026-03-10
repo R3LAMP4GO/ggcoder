@@ -21,6 +21,8 @@ import { createTools } from "./tools/index.js";
 import { MCPClientManager, DEFAULT_MCP_SERVERS } from "./core/mcp/index.js";
 import { discoverAgents } from "./core/agents.js";
 import { BUILTIN_AGENTS } from "./core/builtin-agents.js";
+import { discoverSkills } from "./core/skills.js";
+import { createPlanModeManager } from "./core/plan-mode.js";
 import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
@@ -105,6 +107,7 @@ function main(): void {
       "max-turns": { type: "string" },
       session: { type: "string", short: "s" },
       "restricted-tools": { type: "string" },
+      agents: { type: "string" },
       print: { type: "boolean" },
       json: { type: "boolean" },
       version: { type: "boolean", short: "v" },
@@ -306,9 +309,18 @@ async function runInkTUI(opts: {
     ...userAgents,
   ];
 
-  // Build system prompt & tools (with sub-agent support)
+  // Discover skills (for subagent preloading and future /skills command)
+  const skills = await discoverSkills({
+    globalSkillsDir: paths.skillsDir,
+    projectDir: cwd,
+  });
+
+  // Create plan mode manager
+  const planModeManager = createPlanModeManager(cwd);
+
+  // Build system prompt & tools (with sub-agent + plan mode support)
   const systemPrompt = opts.systemPrompt ?? (await buildSystemPrompt(cwd));
-  const { tools, processManager } = createTools(cwd, { agents, provider, model });
+  const { tools, processManager } = createTools(cwd, { agents, provider, model, planModeManager, skills });
 
   // Connect MCP servers
   const mcpManager = new MCPClientManager();

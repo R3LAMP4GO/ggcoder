@@ -4,6 +4,8 @@ import chalk from "chalk";
 import type { Message, Provider, ServerToolDefinition, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
+import type { PlanModeManager } from "../core/plan-mode.js";
+import type { AgentDefinition } from "../core/agents.js";
 import { App, type CompletedItem } from "./App.js";
 import { SplashScreen } from "./components/SplashScreen.js";
 import { ThemeContext, loadTheme } from "./theme/theme.js";
@@ -31,6 +33,8 @@ export interface RenderAppConfig {
   sessionsDir?: string;
   sessionPath?: string;
   processManager?: ProcessManager;
+  planModeManager?: PlanModeManager;
+  agents?: AgentDefinition[];
   settingsFile?: string;
 }
 
@@ -90,6 +94,8 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
         sessionsDir: config.sessionsDir,
         sessionPath: config.sessionPath,
         processManager: config.processManager,
+        planModeManager: config.planModeManager,
+        agents: config.agents,
         settingsFile: config.settingsFile,
       }),
     ),

@@ -407,6 +407,8 @@ async function runInkTUI(opts: {
     sessionsDir: paths.sessionsDir,
     sessionPath,
     processManager,
+    planModeManager,
+    agents,
     settingsFile: paths.settingsFile,
   });
 

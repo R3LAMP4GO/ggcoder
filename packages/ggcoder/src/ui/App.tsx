@@ -16,6 +16,7 @@ import type {
 } from "@kenkaiiii/gg-ai";
 import { extractImagePaths, type ImageAttachment } from "../utils/image.js";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentDefinition } from "../core/agents.js";
 import { useAgentLoop, type ActivityPhase } from "./hooks/useAgentLoop.js";
 import { UserMessage } from "./components/UserMessage.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
@@ -328,6 +329,8 @@ export interface AppProps {
   sessionsDir?: string;
   sessionPath?: string;
   processManager?: ProcessManager;
+  planModeManager?: PlanModeManager;
+  agents?: AgentDefinition[];
   settingsFile?: string;
 }
 
@@ -381,7 +384,9 @@ export function App(props: AppProps) {
   const [thinkingEnabled, setThinkingEnabled] = useState(!!props.thinking);
 
   // ── Plan mode ──────────────────────────────────────────
-  const planManagerRef = useRef<PlanModeManager>(createPlanModeManager(props.cwd));
+  // Use the shared planModeManager from CLI (wired into tools) when provided,
+  // so tool-level plan mode guards and UI state stay in sync.
+  const planManagerRef = useRef<PlanModeManager>(props.planModeManager ?? createPlanModeManager(props.cwd));
   const [planModeState, setPlanModeState] = useState<PlanModeState>("idle");
   const [showPlanReview, setShowPlanReview] = useState(false);
 
@@ -1026,6 +1031,26 @@ export function App(props: AppProps) {
         return;
       }
 
+      // Handle /agents — list available sub-agents
+      if (trimmed === "/agents") {
+        const agentList = props.agents ?? [];
+        if (agentList.length === 0) {
+          setLiveItems((prev) => [
+            ...prev,
+            { kind: "info", text: "No agents available.", id: getId() },
+          ]);
+        } else {
+          const lines = agentList.map(
+            (a) => `  ${a.name} — ${a.description}${a.source === "project" ? " (project)" : a.source === "global" ? " (global)" : ""}`,
+          );
+          setLiveItems((prev) => [
+            ...prev,
+            { kind: "info", text: `Available agents (${agentList.length}):\n${lines.join("\n")}`, id: getId() },
+          ]);
+        }
+        return;
+      }
+
       // Handle /copy — copy last assistant response to clipboard
       if (trimmed === "/copy") {
         const allItems = [...history, ...liveItems];
@@ -1316,6 +1341,7 @@ export function App(props: AppProps) {
       { name: "clear", aliases: [], description: "Clear session and terminal" },
       { name: "copy", aliases: [], description: "Copy last response to clipboard" },
       { name: "plan", aliases: [], description: "Toggle plan mode (read-only exploration)" },
+      { name: "agents", aliases: [], description: "List available sub-agents" },
       { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
       // Built-in prompt commands, excluding any overridden by custom commands
       ...PROMPT_COMMANDS.filter((cmd) => !customNames.has(cmd.name)).map((cmd) => ({

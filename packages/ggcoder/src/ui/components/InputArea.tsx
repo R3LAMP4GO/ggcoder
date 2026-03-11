@@ -576,16 +576,7 @@ export function InputArea({
   const displayLines = visualLines.slice(startLine, startLine + MAX_VISIBLE_LINES);
   const cursorDisplayLine = cursorLineInfo.line - startLine;
 
-  // Determine if the input starts with a slash command and find command boundary
-  const isCommand = value.startsWith("/");
-  // Command portion ends at first space (e.g., "/research" in "/research some args")
-  const commandEndIndex = isCommand
-    ? value.indexOf(" ") === -1
-      ? value.length
-      : value.indexOf(" ")
-    : 0;
-
-  // Build a set of known command names for inline highlighting (e.g. "fix this /scan")
+  // Build a set of known command names for highlighting (start-of-line + inline)
   const knownCommandNames = useMemo(() => {
     const names = new Set<string>();
     for (const cmd of commands) {
@@ -594,6 +585,16 @@ export function InputArea({
     }
     return names;
   }, [commands]);
+
+  // Determine if the input starts with a known slash command and find command boundary
+  const commandEndIndex = useMemo(() => {
+    if (!value.startsWith("/")) return 0;
+    const spaceIdx = value.indexOf(" ");
+    const cmdToken = spaceIdx === -1 ? value.slice(1) : value.slice(1, spaceIdx);
+    if (!knownCommandNames.has(cmdToken.toLowerCase())) return 0;
+    return spaceIdx === -1 ? value.length : spaceIdx;
+  }, [value, knownCommandNames]);
+  const isCommand = commandEndIndex > 0;
 
   // Find all inline /command token positions for highlighting
   const inlineCommandRanges = useMemo(() => {
@@ -706,34 +707,57 @@ export function InputArea({
               offset++; // newline
             }
 
-            // Determine color for each character based on whether it's in the command portion
+            // Check if a character offset falls inside a highlighted command range
+            const isInCommandRange = (absOffset: number): boolean => {
+              // Start-of-line known command
+              if (isCommand && absOffset < commandEndIndex) return true;
+              // Inline command tokens
+              for (const range of inlineCommandRanges) {
+                if (absOffset >= range.start && absOffset < range.end) return true;
+              }
+              return false;
+            };
+
+            // Render text with command tokens highlighted in blue
             const renderSegments = (text: string, textStartOffset: number) => {
-              if (!isCommand || textStartOffset >= commandEndIndex) {
+              if (inlineCommandRanges.length === 0 && !isCommand) {
                 return <Text color={theme.text}>{text}</Text>;
               }
-              const cmdChars = Math.min(text.length, commandEndIndex - textStartOffset);
-              if (cmdChars >= text.length) {
-                return (
-                  <Text color={theme.commandColor} bold>
-                    {text}
-                  </Text>
-                );
+              // Split text into highlighted and non-highlighted segments
+              const segments: React.ReactNode[] = [];
+              let pos = 0;
+              while (pos < text.length) {
+                const absPos = textStartOffset + pos;
+                if (isInCommandRange(absPos)) {
+                  // Find the end of the highlighted run
+                  let end = pos + 1;
+                  while (end < text.length && isInCommandRange(textStartOffset + end)) end++;
+                  segments.push(
+                    <Text key={`cmd-${pos}`} color={theme.commandColor} bold>
+                      {text.slice(pos, end)}
+                    </Text>,
+                  );
+                  pos = end;
+                } else {
+                  // Find the end of the non-highlighted run
+                  let end = pos + 1;
+                  while (end < text.length && !isInCommandRange(textStartOffset + end)) end++;
+                  segments.push(
+                    <Text key={`txt-${pos}`} color={theme.text}>
+                      {text.slice(pos, end)}
+                    </Text>,
+                  );
+                  pos = end;
+                }
               }
-              return (
-                <>
-                  <Text color={theme.commandColor} bold>
-                    {text.slice(0, cmdChars)}
-                  </Text>
-                  <Text color={theme.text}>{text.slice(cmdChars)}</Text>
-                </>
-              );
+              return <>{segments}</>;
             };
 
             const before = showCursor ? line.slice(0, col) : line;
             const charUnderCursor = showCursor ? (col < line.length ? line[col] : " ") : "";
             const after = showCursor ? line.slice(col + (col < line.length ? 1 : 0)) : "";
             const cursorCharOffset = lineStartOffset + col;
-            const cursorInCommand = isCommand && cursorCharOffset < commandEndIndex;
+            const cursorInCommand = isInCommandRange(cursorCharOffset);
 
             return (
               <Box key={i}>

@@ -8,6 +8,7 @@ import {
 import { estimateConversationTokens, estimateMessageTokens } from "./token-estimator.js";
 import { getSummaryModel } from "../model-registry.js";
 import { log } from "../logger.js";
+import fs from "node:fs/promises";
 
 /** Max chars per tool result when building the summary prompt. */
 const TOOL_RESULT_SUMMARY_MAX_CHARS = 2000;
@@ -160,6 +161,41 @@ function serializeMessageForSummary(msg: Message): string {
 const KEEP_RECENT_TOKENS = 20_000;
 
 /**
+ * Build file state attachments for recently modified files.
+ * Re-reads key files from disk after compaction so the model
+ * has immediate access without needing to re-read them.
+ */
+export async function buildFileStateAttachments(
+  fileOps: { read: Set<string>; modified: Set<string> },
+  maxFiles = 5,
+  maxCharsPerFile = 5000,
+): Promise<string> {
+  // Prioritize modified files, then recently read files
+  const filesToRestore = [
+    ...fileOps.modified,
+    ...[...fileOps.read].filter((f) => !fileOps.modified.has(f)),
+  ].slice(0, maxFiles);
+
+  if (filesToRestore.length === 0) return "";
+
+  const parts: string[] = ["\n\n## Recently Modified Files (restored after compaction)\n"];
+
+  for (const filePath of filesToRestore) {
+    try {
+      let content = await fs.readFile(filePath, "utf-8");
+      if (content.length > maxCharsPerFile) {
+        content = content.slice(0, maxCharsPerFile) + `\n\n[... truncated, ${content.length - maxCharsPerFile} more chars]`;
+      }
+      parts.push(`### ${filePath}\n\`\`\`\n${content}\n\`\`\`\n`);
+    } catch {
+      // File may have been deleted or moved — skip silently
+    }
+  }
+
+  return parts.length > 1 ? parts.join("\n") : "";
+}
+
+/**
  * Compact a conversation by summarizing older messages via LLM.
  *
  * - Keeps the system message (index 0) intact.
@@ -277,10 +313,13 @@ export async function compact(
     summaryChars: String(summaryText.length),
   });
 
+  // Restore recently modified file contents for context
+  const fileAttachments = await buildFileStateAttachments(fileOps);
+
   // Build new messages array
   const summaryMessage: Message = {
     role: "user",
-    content: `[Previous conversation summary]\n\n${summaryText}${fileTrackingSection}`,
+    content: `[Previous conversation summary]\n\n${summaryText}${fileTrackingSection}${fileAttachments}`,
   };
 
   const newMessages: Message[] = [

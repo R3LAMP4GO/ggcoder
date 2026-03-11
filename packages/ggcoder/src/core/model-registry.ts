@@ -104,6 +104,7 @@ export const MODELS: ModelInfo[] = [
     contextWindow: 40_960,
     maxOutputTokens: 8_192,
     supportsThinking: false,
+    supportsImages: false,
     costTier: "low",
   },
   {
@@ -113,6 +114,7 @@ export const MODELS: ModelInfo[] = [
     contextWindow: 40_960,
     maxOutputTokens: 8_192,
     supportsThinking: true,
+    supportsImages: false,
     costTier: "low",
   },
 ];

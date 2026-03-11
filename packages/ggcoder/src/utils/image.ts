@@ -505,6 +505,7 @@ async function readClipboardTmpFile(tmpPath: string): Promise<ImageAttachment | 
     if (rawBuffer.length === 0) return null;
     const processed = await processImage(rawBuffer);
     return {
+      kind: "image",
       fileName: "clipboard.png",
       filePath: tmpPath,
       mediaType: processed.mediaType,

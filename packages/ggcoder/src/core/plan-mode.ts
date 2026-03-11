@@ -22,6 +22,7 @@ export interface PlanModeManager {
   readonly planContent: string | null;
   readonly planFilePath: string | null;
   readonly rejectionFeedback: string | null;
+  readonly clearContextOnExit: boolean;
 
   /** idle → planning */
   enter(reason?: string): void;
@@ -43,6 +44,15 @@ export interface PlanModeManager {
 
   /** Increment the count of questions asked during this plan session */
   incrementQuestionCount(): void;
+
+  /** Whether the interview phase is currently active */
+  readonly interviewPhase: boolean;
+
+  /** Enable or disable the interview phase */
+  setInterviewPhase(enabled: boolean): void;
+
+  /** Set whether to clear context on plan mode exit */
+  setClearContextOnExit(value: boolean): void;
 
   /** Update plan content after external editing (only in reviewing state) */
   updatePlanContent(content: string): void;
@@ -153,6 +163,21 @@ export const PLAN_MODE_SYSTEM_PROMPT = `## Plan Mode (ACTIVE)
 
 You are in READ-ONLY planning mode. You can explore the codebase but CANNOT modify files.
 
+### Interview Phase (ACTIVE)
+
+Before creating your plan, you MUST gather requirements through structured questions. Do NOT skip this phase.
+
+**Workflow:**
+1. Explore the codebase first (read, grep, find, ls) to understand existing patterns
+2. Ask 2-4 structured questions using \`ask_user_question\` to clarify:
+   - Scope and boundaries of the change
+   - Preferred approach when multiple valid options exist  
+   - Constraints or requirements not obvious from the code
+3. Process answers and ask follow-up questions if needed
+4. Only proceed to plan creation when you have enough clarity
+
+**Important:** The goal is to prevent wasted planning effort. A 2-minute interview saves 10 minutes of plan revision.
+
 ### Gather requirements with ask_user_question
 
 Before creating a plan, use the \`ask_user_question\` tool to clarify requirements and understand preferences. Do NOT rush to create a plan — explore first, then ask structured questions.
@@ -241,6 +266,8 @@ export function createPlanModeManager(cwd: string): PlanModeManager {
   let entryMethod: "tool" | "hotkey" | "command" = "tool";
   let enterTimestamp: number | null = null;
   let questionCount = 0;
+  let interviewPhase = true;
+  let clearContextOnExit = false;
   const listeners = new Set<PlanModeListener>();
 
   function notify() {
@@ -273,6 +300,12 @@ export function createPlanModeManager(cwd: string): PlanModeManager {
     get rejectionFeedback() {
       return rejectionFeedback;
     },
+    get clearContextOnExit() {
+      return clearContextOnExit;
+    },
+    setClearContextOnExit(value: boolean) {
+      clearContextOnExit = value;
+    },
 
     setEntryMethod(method: "tool" | "hotkey" | "command") {
       entryMethod = method;
@@ -280,6 +313,13 @@ export function createPlanModeManager(cwd: string): PlanModeManager {
 
     incrementQuestionCount() {
       questionCount++;
+    },
+
+    get interviewPhase() {
+      return interviewPhase;
+    },
+    setInterviewPhase(enabled: boolean) {
+      interviewPhase = enabled;
     },
 
     enter(reason?: string) {
@@ -332,6 +372,7 @@ export function createPlanModeManager(cwd: string): PlanModeManager {
         planLengthChars: content.length,
         interviewPhaseEnabled: true,
         questionCount,
+        interviewQuestionsAsked: questionCount,
       });
 
       transition("reviewing");
@@ -350,6 +391,7 @@ export function createPlanModeManager(cwd: string): PlanModeManager {
         outcome: "approved",
         interviewPhaseEnabled: true,
         questionCount,
+        interviewQuestionsAsked: questionCount,
         durationMs: getDurationMs(),
         planLengthChars: planContent?.length,
       });
@@ -409,6 +451,8 @@ export function createPlanModeManager(cwd: string): PlanModeManager {
       rejectionFeedback = null;
       enterTimestamp = null;
       questionCount = 0;
+      interviewPhase = true;
+      clearContextOnExit = false;
       transition("idle");
     },
 

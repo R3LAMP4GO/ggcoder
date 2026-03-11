@@ -11,6 +11,37 @@ export interface BuildSystemPromptOptions {
 }
 
 /**
+ * Build a short system reminder for plan mode constraints.
+ * Injected periodically to reinforce read-only behavior.
+ */
+export function buildPlanModeReminder(planFilePath: string | null, isReentry: boolean): string {
+  if (isReentry) {
+    const pathNote = planFilePath ? ` A plan file exists at ${planFilePath} from your previous session.` : "";
+    return (
+      `## Re-entering Plan Mode\n\n` +
+      `You are returning to plan mode.${pathNote} ` +
+      `Treat this as a fresh planning session. Do not assume the existing plan is relevant without evaluating it first.`
+    );
+  }
+
+  const pathNote = planFilePath ? ` Plan file: ${planFilePath}.` : "";
+  return (
+    `Plan mode still active. Read-only — no edits except .gg/plans/.${pathNote} ` +
+    `Use ask_user_question for clarifications or exit_plan_mode when plan is ready.`
+  );
+}
+
+/**
+ * Build a reminder message for when plan mode is exited.
+ */
+export function buildPlanModeExitReminder(planFilePath: string | null, planExists: boolean): string {
+  const planRef = planExists && planFilePath
+    ? ` The plan file is located at ${planFilePath} if you need to reference it.`
+    : "";
+  return `Exited plan mode. You can now make edits, run tools, and take actions.${planRef}`;
+}
+
+/**
  * Build the system prompt dynamically based on cwd and context.
  */
 export async function buildSystemPrompt(
@@ -152,6 +183,16 @@ export async function buildSystemPrompt(
   // 10. Plan mode — injected only when active
   if (planModeState === "planning") {
     sections.push(PLAN_MODE_SYSTEM_PROMPT);
+  }
+
+  // Plan mode critical reminder — trailing reinforcement after all other sections
+  if (planModeState === "planning") {
+    sections.push(
+      `<!-- plan-mode-reminder -->\n` +
+      `CRITICAL REMINDER: Plan mode is ACTIVE. Do NOT write/edit files. ` +
+      `Use exit_plan_mode to present your plan for user approval. ` +
+      `Do NOT use ask_user_question to ask about plan approval.`,
+    );
   }
 
   // Dynamic section (uncached) — separated by marker so the transform layer

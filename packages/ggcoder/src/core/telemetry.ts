@@ -16,6 +16,7 @@ export interface PlanModeEvent {
   outcome?: "approved" | "rejected" | "cancelled";
   interviewPhaseEnabled: boolean;
   questionCount?: number;
+  interviewQuestionsAsked?: number;
   durationMs?: number;
 }
 

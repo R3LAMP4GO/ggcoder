@@ -9,6 +9,7 @@
  */
 
 import type { AgentDefinition } from "./agents.js";
+import type { Provider } from "@kenkaiiii/gg-ai";
 import { getCheapestModel, getMidTierModel } from "./model-registry.js";
 
 // ── Common Suffix ────────────────────────────────────────
@@ -263,10 +264,10 @@ export function resolveAgentModel(
   switch (agentModel) {
     case "haiku":
     case "cheapest":
-      return getCheapestModel(provider);
+      return getCheapestModel(provider as Provider);
     case "sonnet":
     case "mid":
-      return getMidTierModel(provider, parentModel);
+      return getMidTierModel(provider as Provider, parentModel);
     default:
       return agentModel;
   }

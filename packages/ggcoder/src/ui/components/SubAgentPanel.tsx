@@ -77,6 +77,8 @@ const AgentRow = React.memo(
       detail = (
         <Text color={theme.textDim}>
           {formatTokens(totalTokens)} tokens
+          {" · "}
+          {agent.toolUseCount} tool use{agent.toolUseCount !== 1 ? "s" : ""}
           {agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}
         </Text>
       );
@@ -98,6 +100,13 @@ const AgentRow = React.memo(
           <Text bold={isRunning} color={agent.status === "done" ? theme.success : undefined}>
             {agent.status === "done" ? "✓ " : agent.status === "error" ? "✗ " : ""}
           </Text>
+          {agent.agentName && agent.agentName !== "default" && (
+            <Text color={theme.accent} dimColor={!isRunning}>
+              {"["}
+              {agent.agentName}
+              {"] "}
+            </Text>
+          )}
           <Text bold={isRunning}>{taskDisplay}</Text>
         </Box>
         {/* Detail line */}

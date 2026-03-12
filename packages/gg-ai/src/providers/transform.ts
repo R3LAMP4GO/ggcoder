@@ -246,9 +246,15 @@ function remapToolCallId(id: string, idMap: Map<string, string>): string {
   return mapped;
 }
 
-export function toOpenAIMessages(messages: Message[]): OpenAI.ChatCompletionMessageParam[] {
+export function toOpenAIMessages(
+  messages: Message[],
+  options?: { provider?: string },
+): OpenAI.ChatCompletionMessageParam[] {
   const out: OpenAI.ChatCompletionMessageParam[] = [];
   const idMap = new Map<string, string>();
+  // GLM drops reasoning_content when a user message follows tool results.
+  // Merge user text into the last tool message to preserve thinking context.
+  const mergeToolResultText = options?.provider === "glm";
 
   for (const msg of messages) {
     if (msg.role === "system") {
@@ -256,6 +262,23 @@ export function toOpenAIMessages(messages: Message[]): OpenAI.ChatCompletionMess
       continue;
     }
     if (msg.role === "user") {
+      // For GLM: if the previous message is a tool result, merge text into it
+      // to avoid a standalone user message that causes reasoning_content to be dropped.
+      if (mergeToolResultText && out.length > 0 && out[out.length - 1]!.role === "tool") {
+        const userText =
+          typeof msg.content === "string"
+            ? msg.content
+            : msg.content
+                .filter((p): p is TextContent => p.type === "text")
+                .map((p) => p.text)
+                .join("");
+        if (userText) {
+          // Append text to the last tool message's content
+          const lastTool = out[out.length - 1] as OpenAI.ChatCompletionToolMessageParam;
+          lastTool.content = (lastTool.content ?? "") + "\n\n" + userText;
+          continue;
+        }
+      }
       if (typeof msg.content === "string") {
         out.push({ role: "user", content: msg.content });
       } else {

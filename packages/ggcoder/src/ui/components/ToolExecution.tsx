@@ -1,4 +1,4 @@
-import React, { useState, useEffect, memo } from "react";
+import React, { memo } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Spinner } from "./Spinner.js";
@@ -35,16 +35,6 @@ const COMPACT_TOOLS = new Set(["read", "grep", "find", "ls"]);
 export function ToolExecution(props: ToolExecutionProps) {
   const theme = useTheme();
 
-  // Fade-in effect for completed tools
-  const [isFresh, setIsFresh] = useState(false);
-  useEffect(() => {
-    if (props.status === "done") {
-      setIsFresh(true);
-      const timer = setTimeout(() => setIsFresh(false), 200);
-      return () => clearTimeout(timer);
-    }
-  }, [props.status]);
-
   if (props.status === "running") {
     // Compact tools get a summary label while running
     if (COMPACT_TOOLS.has(props.name)) {
@@ -71,10 +61,8 @@ export function ToolExecution(props: ToolExecutionProps) {
     return (
       <Box marginTop={1} flexShrink={1}>
         <Text>
-          <Text color={theme.primary} dimColor={isFresh}>
-            {"⏺ "}
-          </Text>
-          <Text bold color={theme.toolName} dimColor={isFresh}>
+          <Text color={theme.primary}>{"⏺ "}</Text>
+          <Text bold color={theme.toolName}>
             {summary}
           </Text>
         </Text>
@@ -95,25 +83,18 @@ export function ToolExecution(props: ToolExecutionProps) {
     return (
       <Box marginTop={1} flexShrink={1}>
         <Text>
-          <Text color={theme.primary} dimColor={isFresh}>
-            {"⏺ "}
-          </Text>
-          <Text bold color={headerColor} dimColor={isFresh}>
+          <Text color={theme.primary}>{"⏺ "}</Text>
+          <Text bold color={headerColor}>
             {label}
           </Text>
           {detail && (
-            <Text color={theme.text} dimColor={isFresh}>
+            <Text color={theme.text}>
               {"("}
               {detail}
               {")"}
             </Text>
           )}
-          {inline && (
-            <Text color={theme.textDim} dimColor={isFresh}>
-              {" "}
-              {inline}
-            </Text>
-          )}
+          {inline && <Text color={theme.textDim}> {inline}</Text>}
         </Text>
       </Box>
     );
@@ -127,14 +108,12 @@ export function ToolExecution(props: ToolExecutionProps) {
       {/* Header */}
       <Box>
         <Text>
-          <Text color={theme.primary} dimColor={isFresh}>
-            {"⏺ "}
-          </Text>
-          <Text bold color={headerColor} dimColor={isFresh}>
+          <Text color={theme.primary}>{"⏺ "}</Text>
+          <Text bold color={headerColor}>
             {label}
           </Text>
           {detail && (
-            <Text color={theme.text} dimColor={isFresh}>
+            <Text color={theme.text}>
               {"("}
               {detail}
               {")"}
@@ -569,20 +548,11 @@ const DiffLine = memo(function DiffLine({
   line: NumberedDiffLine;
   padWidth: number;
 }) {
-  // Flash animation: changed lines briefly appear brighter on mount
-  const [isNew, setIsNew] = useState(line.type !== "context");
-  useEffect(() => {
-    if (line.type !== "context") {
-      const timer = setTimeout(() => setIsNew(false), 300);
-      return () => clearTimeout(timer);
-    }
-  }, [line.type]);
-
   const lineNo = String(line.lineNo).padStart(padWidth, " ");
 
   if (line.type === "add") {
     return (
-      <Text backgroundColor={isNew ? "#22c55e" : "#16a34a"} color="#ffffff" bold={isNew}>
+      <Text backgroundColor="#16a34a" color="#ffffff">
         {lineNo}
         {"  "}
         {line.content}
@@ -591,7 +561,7 @@ const DiffLine = memo(function DiffLine({
   }
   if (line.type === "remove") {
     return (
-      <Text backgroundColor={isNew ? "#ef4444" : "#dc2626"} color="#ffffff" bold={isNew}>
+      <Text backgroundColor="#dc2626" color="#ffffff">
         {lineNo}
         {"  "}
         {line.content}

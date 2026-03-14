@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useStdout } from "ink";
 import type { ActivityPhase } from "./useAgentLoop.js";
 
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
+import { useAnimationTick, deriveFrame } from "../components/AnimationContext.js";
 
 function getTitleText(phase: ActivityPhase, isRunning: boolean): string {
   if (!isRunning) return "GG Coder";
@@ -23,19 +24,9 @@ function getTitleText(phase: ActivityPhase, isRunning: boolean): string {
 export function useTerminalTitle(phase: ActivityPhase, isRunning: boolean): void {
   const { stdout } = useStdout();
 
-  const [spinnerFrame, setSpinnerFrame] = useState(0);
-
-  // Spinner animation while running
-  useEffect(() => {
-    if (!isRunning) {
-      setSpinnerFrame(0);
-      return;
-    }
-    const timer = setInterval(() => {
-      setSpinnerFrame((f) => (f + 1) % SPINNER_FRAMES.length);
-    }, SPINNER_INTERVAL);
-    return () => clearInterval(timer);
-  }, [isRunning]);
+  // Derive spinner frame from global animation tick — no independent timer
+  const tick = useAnimationTick();
+  const spinnerFrame = isRunning ? deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length) : 0;
 
   // Write terminal title
   useEffect(() => {

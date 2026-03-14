@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Spinner } from "./Spinner.js";
@@ -137,7 +137,13 @@ function summaryToString(segments: SummarySegment[]): string {
 export function ToolGroupExecution({ tools }: { tools: ToolGroupTool[] }) {
   const theme = useTheme();
   const allDone = tools.every((t) => t.status === "done");
-  const segments = buildGroupSummary(tools, allDone);
+  const doneCount = tools.filter((t) => t.status === "done").length;
+  const toolNames = tools.map((t) => t.name).join(",");
+  const segments = useMemo(
+    () => buildGroupSummary(tools, allDone),
+    // Re-compute when tool composition or completion status changes
+    [toolNames, doneCount, allDone],
+  );
 
   if (!allDone) {
     return (

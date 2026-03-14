@@ -37,7 +37,8 @@ export function StreamingArea({
   useEffect(() => {
     if (streamingText !== prevTextRef.current) {
       prevTextRef.current = streamingText;
-      setTextStale(false);
+      // Only trigger a re-render if we're transitioning from stale → active
+      if (textStale) setTextStale(false);
       if (staleTimerRef.current) clearTimeout(staleTimerRef.current);
       staleTimerRef.current = setTimeout(() => {
         setTextStale(true);
@@ -46,7 +47,7 @@ export function StreamingArea({
     return () => {
       if (staleTimerRef.current) clearTimeout(staleTimerRef.current);
     };
-  }, [streamingText]);
+  }, [streamingText]); // textStale intentionally omitted — we only read it to gate the setState
 
   useEffect(() => {
     if (!isRunning || !textStale) {

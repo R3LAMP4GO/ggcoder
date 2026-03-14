@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
+import { useAnimationTick, deriveFrame } from "./AnimationContext.js";
 
 export interface SubAgentInfo {
   toolCallId: string;
@@ -47,15 +48,9 @@ const AgentRow = React.memo(
     const theme = useTheme();
     const isRunning = agent.status === "running" && !aborted;
 
-    // Spinner for running agents
-    const [frame, setFrame] = useState(0);
-    useEffect(() => {
-      if (!isRunning) return;
-      const timer = setInterval(() => {
-        setFrame((f) => (f + 1) % SPINNER_FRAMES.length);
-      }, SPINNER_INTERVAL);
-      return () => clearInterval(timer);
-    }, [isRunning]);
+    // Derive spinner frame from global animation tick
+    const tick = useAnimationTick();
+    const frame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
 
     const branch = isLast ? "└─" : "├─";
     const continuation = isLast ? "   " : "│  ";
@@ -67,10 +62,16 @@ const AgentRow = React.memo(
     // Status detail line shown below the task name
     let detail: React.ReactNode;
     if (isRunning) {
+      const activity = agent.currentActivity ?? "Starting…";
+      // Truncate to prevent wrapping — leave room for tree chars + spinner
+      const cols = process.stdout.columns || 80;
+      const maxActivity = Math.max(20, cols - 15);
+      const truncActivity =
+        activity.length > maxActivity ? activity.slice(0, maxActivity - 1) + "…" : activity;
       detail = (
         <Text>
           <Text color={theme.primary}>{SPINNER_FRAMES[frame]} </Text>
-          <Text color={theme.textDim}>{agent.currentActivity ?? "Starting…"}</Text>
+          <Text color={theme.textDim}>{truncActivity}</Text>
         </Text>
       );
     } else if (agent.status === "done") {

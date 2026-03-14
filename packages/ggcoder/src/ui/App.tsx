@@ -30,6 +30,7 @@ import { BackgroundTasksBar } from "./components/BackgroundTasksBar.js";
 import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
 import type { ProcessManager, BackgroundProcess } from "../core/process-manager.js";
 import { useTheme } from "./theme/theme.js";
+import { useAnimationTick, deriveFrame } from "./components/AnimationContext.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
 import { getModel, getContextWindow } from "../core/model-registry.js";
@@ -1043,25 +1044,12 @@ export function App(props: AppProps) {
     setTitleRunning(agentLoop.isRunning);
   }, [agentLoop.activityPhase, agentLoop.isRunning]);
 
-  // Animated thinking border
-  const [thinkingBorderFrame, setThinkingBorderFrame] = useState(0);
-  useEffect(() => {
-    if (agentLoop.activityPhase !== "thinking") return;
-    const timer = setInterval(() => {
-      setThinkingBorderFrame((f) => (f + 1) % THINKING_BORDER_COLORS.length);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [agentLoop.activityPhase]);
-
-  // Success flash on turn completion
-  const [doneFlash, setDoneFlash] = useState(false);
-  useEffect(() => {
-    if (doneStatus) {
-      setDoneFlash(true);
-      const timer = setTimeout(() => setDoneFlash(false), 600);
-      return () => clearTimeout(timer);
-    }
-  }, [doneStatus]);
+  // Animated thinking border — derived from global animation tick
+  const animTick = useAnimationTick();
+  const thinkingBorderFrame =
+    agentLoop.activityPhase === "thinking"
+      ? deriveFrame(animTick, 1000, THINKING_BORDER_COLORS.length)
+      : 0;
 
   const handleSubmit = useCallback(
     async (input: string, inputImages: ImageAttachment[] = [], pasteInfo?: PasteInfo) => {
@@ -1647,7 +1635,7 @@ export function App(props: AppProps) {
           ) : (
             doneStatus && (
               <Box marginTop={1}>
-                <Text color={doneFlash ? theme.success : theme.textDim}>
+                <Text color={theme.success}>
                   {"✻ "}
                   {doneStatus.verb} {formatDuration(doneStatus.durationMs)}
                 </Text>

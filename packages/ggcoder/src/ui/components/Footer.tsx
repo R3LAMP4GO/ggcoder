@@ -24,7 +24,6 @@ const MODEL_SHORT_NAMES: Record<string, string> = {
   "o4-mini": "o4-mini",
 };
 
-
 function getShortModelName(model: string): string {
   return MODEL_SHORT_NAMES[model] ?? model;
 }

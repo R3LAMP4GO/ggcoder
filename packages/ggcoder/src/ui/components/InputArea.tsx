@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Text, Box, useInput, useStdout, useStdin } from "ink";
 import type { EventEmitter } from "events";
 import { useTheme } from "../theme/theme.js";
+import { useAnimationTick, deriveFrame } from "./AnimationContext.js";
 import type { ImageAttachment } from "../../utils/image.js";
 import { extractImagePaths, readImageFile, getClipboardImage } from "../../utils/image.js";
 import { SlashCommandMenu, filterCommands, type SlashCommandInfo } from "./SlashCommandMenu.js";
@@ -116,28 +117,12 @@ export function InputArea({
     () => [theme.primary, theme.accent, theme.secondary, theme.accent],
     [theme.primary, theme.accent, theme.secondary],
   );
-  const [borderFrame, setBorderFrame] = useState(0);
-  useEffect(() => {
-    if (disabled) return;
-    const timer = setInterval(() => {
-      setBorderFrame((f) => (f + 1) % borderPulseColors.length);
-    }, 800);
-    return () => clearInterval(timer);
-  }, [disabled, borderPulseColors]);
 
-  // Cursor blink — only tick while the input is active to avoid
-  // unnecessary Ink re-renders when the CLI sits idle for hours.
-  const [cursorVisible, setCursorVisible] = useState(true);
-  useEffect(() => {
-    if (!isActive) {
-      setCursorVisible(true);
-      return;
-    }
-    const timer = setInterval(() => {
-      setCursorVisible((v) => !v);
-    }, 530);
-    return () => clearInterval(timer);
-  }, [isActive]);
+  // Derive border pulse and cursor blink from global animation tick
+  const tick = useAnimationTick();
+  const borderFrame = disabled ? 0 : deriveFrame(tick, 800, borderPulseColors.length);
+  // Cursor blink: ~530ms period → visible for ~500ms, hidden for ~500ms
+  const cursorVisible = !isActive || deriveFrame(tick, 530, 2) === 0;
 
   // Auto-detect image paths as they're pasted/typed — debounce so full paste arrives
   const extractingRef = useRef(false);

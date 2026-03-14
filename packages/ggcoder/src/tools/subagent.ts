@@ -120,7 +120,10 @@ export function createSubAgentTool(
                 break;
               case "tool_call_start":
                 toolUseCount++;
-                currentActivity = `${event.name}: ${truncateStr(JSON.stringify(event.args), 60)}`;
+                currentActivity = formatToolActivity(
+                  event.name as string,
+                  event.args as Record<string, unknown>,
+                );
                 context.onUpdate?.({
                   toolUseCount,
                   tokenUsage: { ...tokenUsage },
@@ -200,6 +203,47 @@ export function createSubAgentTool(
       });
     },
   };
+}
+
+/** Build a short, human-readable activity string for a sub-agent tool call. */
+function formatToolActivity(name: string, args: Record<string, unknown>): string {
+  // Extract the most meaningful short value for common tools
+  switch (name) {
+    case "read":
+      return `Reading ${shortenPath(String(args.file_path ?? ""))}`;
+    case "write":
+      return `Writing ${shortenPath(String(args.file_path ?? ""))}`;
+    case "edit":
+      return `Editing ${shortenPath(String(args.file_path ?? ""))}`;
+    case "grep": {
+      const pat = String(args.pattern ?? "");
+      return `Searching for "${truncateStr(pat, 30)}"`;
+    }
+    case "find": {
+      const pat = String(args.pattern ?? "");
+      return `Finding "${truncateStr(pat, 30)}"`;
+    }
+    case "ls":
+      return `Listing ${shortenPath(String(args.path ?? "."))}`;
+    case "bash": {
+      const cmd = String(args.command ?? "").split("\n")[0];
+      return `Running ${truncateStr(cmd, 35)}`;
+    }
+    case "web_fetch":
+      return `Fetching ${truncateStr(String(args.url ?? ""), 35)}`;
+    default: {
+      // MCP or unknown tools — show name + first short arg value
+      const firstVal = Object.values(args).find((v) => typeof v === "string" && v.length > 0);
+      const detail = firstVal ? truncateStr(String(firstVal), 30) : "";
+      return detail ? `${name}: ${detail}` : name;
+    }
+  }
+}
+
+function shortenPath(filePath: string): string {
+  const parts = filePath.split("/");
+  if (parts.length <= 3) return filePath;
+  return "…/" + parts.slice(-2).join("/");
 }
 
 function truncateStr(s: string, max: number): string {

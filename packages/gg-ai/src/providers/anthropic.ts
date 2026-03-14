@@ -48,7 +48,10 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
   // OAuth tokens require Claude Code identity in the system prompt
   const system = isOAuth
     ? [
-        { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        {
+          type: "text" as const,
+          text: "You are Claude Code, Anthropic's official CLI for Claude.",
+        },
         ...(rawSystem ?? []),
       ]
     : rawSystem;

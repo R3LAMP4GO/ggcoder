@@ -33,10 +33,12 @@ export function useTerminalSize() {
     // Debounce the resizeKey bump — only fires after the user stops dragging
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      // Clear the visible screen. Scrollback is preserved so mouse scroll
-      // continues to work.
+      // Clear visible screen + scrollback to remove deformed ghost renders
+      // left behind by Ink re-rendering at different terminal widths during
+      // a resize drag.
       stdout.write(
         "\x1b[2J" + // clear visible screen
+          "\x1b[3J" + // clear scrollback buffer
           "\x1b[H", // cursor home
       );
       setResizeKey((k) => k + 1);

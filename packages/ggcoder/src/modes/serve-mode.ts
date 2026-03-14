@@ -110,6 +110,8 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
 
   const config = await loadConfig();
   const chatStates = new Map<number, ChatState>();
+  /** Guards against concurrent session creation for the same chat. */
+  const chatCreationLocks = new Map<number, Promise<ChatState>>();
   /** Chats waiting for a number selection after /link showed the project list. */
   const pendingLinkSelections = new Map<number, string[]>();
 
@@ -119,32 +121,45 @@ export async function runServeMode(options: ServeModeOptions): Promise<void> {
     const existing = chatStates.get(chatId);
     if (existing) return existing;
 
-    const ac = new AbortController();
-    const session = new AgentSession({
-      provider: options.provider,
-      model: options.model,
-      cwd,
-      thinkingLevel: options.thinkingLevel,
-      signal: ac.signal,
-    });
+    // If another call is already creating this chat, share its promise
+    const pending = chatCreationLocks.get(chatId);
+    if (pending) return pending;
 
-    await session.initialize();
-    log("INFO", "serve", `Session initialized for chat ${chatId}`, { cwd });
+    const promise = (async (): Promise<ChatState> => {
+      const ac = new AbortController();
+      const session = new AgentSession({
+        provider: options.provider,
+        model: options.model,
+        cwd,
+        thinkingLevel: options.thinkingLevel,
+        signal: ac.signal,
+      });
 
-    const state: ChatState = {
-      chatId,
-      cwd,
-      session,
-      ac,
-      textBuffer: "",
-      activeTools: new Map(),
-      isProcessing: false,
-      typingInterval: null,
-    };
+      await session.initialize();
+      log("INFO", "serve", `Session initialized for chat ${chatId}`, { cwd });
 
-    chatStates.set(chatId, state);
-    wireSessionEvents(state);
-    return state;
+      const state: ChatState = {
+        chatId,
+        cwd,
+        session,
+        ac,
+        textBuffer: "",
+        activeTools: new Map(),
+        isProcessing: false,
+        typingInterval: null,
+      };
+
+      chatStates.set(chatId, state);
+      wireSessionEvents(state);
+      return state;
+    })();
+
+    chatCreationLocks.set(chatId, promise);
+    try {
+      return await promise;
+    } finally {
+      chatCreationLocks.delete(chatId);
+    }
   }
 
   function resolveProjectPath(chatId: number): string {

@@ -24,7 +24,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

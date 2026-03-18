@@ -9,6 +9,7 @@
     "lint:fix": "eslint packages/*/src/ --fix",
     "format": "prettier --write packages/*/src/",
     "format:check": "prettier --check packages/*/src/",
+    "test": "pnpm -r test",
     "prepare": "pnpm build"
   },
   "devDependencies": {

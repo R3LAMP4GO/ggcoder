@@ -24,7 +24,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@kenkaiiii/gg-ai": "workspace:*",

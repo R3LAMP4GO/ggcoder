@@ -279,6 +279,7 @@ export async function compact(
     apiKey?: string;
     contextWindow: number;
     signal?: AbortSignal;
+    approvedPlanPath?: string;
   },
 ): Promise<{ messages: Message[]; result: CompactionResult }> {
   const originalCount = messages.length;
@@ -365,8 +366,16 @@ export async function compact(
 
   // Build the summary messages array following the Nao pattern:
   // [system, ...actual conversation messages, user prompt to summarize]
+  // Add plan preservation instruction if an approved plan is active
+  const planPreservation = options.approvedPlanPath
+    ? `\n\n### APPROVED PLAN PRESERVATION\n` +
+      `An approved implementation plan exists at: ${options.approvedPlanPath}\n` +
+      `You MUST preserve all references to this plan and its approval status in the summary. ` +
+      `The agent is following this plan for implementation — do not lose this context.`
+    : "";
+
   const summaryMessages: Message[] = [
-    { role: "system", content: COMPACTION_SYSTEM_PROMPT },
+    { role: "system", content: COMPACTION_SYSTEM_PROMPT + planPreservation },
     ...selectedMessages,
     { role: "user", content: COMPACTION_USER_PROMPT },
   ];

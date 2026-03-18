@@ -35,6 +35,7 @@ export function createSubAgentTool(
   agents: AgentDefinition[],
   parentProvider: string,
   parentModel: string,
+  planModeRef?: { current: boolean },
 ): AgentTool<typeof SubAgentParams> {
   const agentList = agents.map((a) => `- ${a.name}: ${a.description}`).join("\n");
   const agentDesc = agentList
@@ -48,6 +49,10 @@ export function createSubAgentTool(
       agentDesc,
     parameters: SubAgentParams,
     async execute(args, context) {
+      if (planModeRef?.current) {
+        return "Error: subagent is restricted in plan mode. Use read-only tools to explore the codebase.";
+      }
+
       const startTime = Date.now();
 
       // Resolve agent definition if specified

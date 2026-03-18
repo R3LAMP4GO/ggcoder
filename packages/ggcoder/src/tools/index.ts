@@ -13,6 +13,8 @@ import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
 import { createTasksTool } from "./tasks.js";
 import { createSkillTool } from "./skill.js";
+import { createEnterPlanTool } from "./enter-plan.js";
+import { createExitPlanTool } from "./exit-plan.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import type { AgentDefinition } from "../core/agents.js";
 import type { Skill } from "../core/skills.js";
@@ -24,6 +26,12 @@ export interface CreateToolsOptions {
   model?: string;
   /** Custom I/O operations for remote execution (SSH, Docker, etc.). Defaults to local filesystem. */
   operations?: ToolOperations;
+  /** Ref for checking plan mode state inside tool execute functions. */
+  planModeRef?: { current: boolean };
+  /** Callback when the LLM enters plan mode. */
+  onEnterPlan?: (reason?: string) => void;
+  /** Callback when the LLM exits plan mode. Returns approval result string. */
+  onExitPlan?: (planPath: string) => Promise<string>;
 }
 
 export interface CreateToolsResult {
@@ -35,12 +43,13 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   const readFiles = new Set<string>();
   const processManager = new ProcessManager();
   const ops = opts?.operations ?? localOperations;
+  const planModeRef = opts?.planModeRef;
 
   const tools: AgentTool[] = [
     createReadTool(cwd, readFiles, ops),
-    createWriteTool(cwd, readFiles, ops),
-    createEditTool(cwd, readFiles, ops),
-    createBashTool(cwd, processManager, ops),
+    createWriteTool(cwd, readFiles, ops, planModeRef),
+    createEditTool(cwd, readFiles, ops, planModeRef),
+    createBashTool(cwd, processManager, ops, planModeRef),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
     createLsTool(cwd, ops),
@@ -51,11 +60,19 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   ];
 
   if (opts?.agents && opts.agents.length > 0 && opts.provider && opts.model) {
-    tools.push(createSubAgentTool(cwd, opts.agents, opts.provider, opts.model));
+    tools.push(createSubAgentTool(cwd, opts.agents, opts.provider, opts.model, planModeRef));
   }
 
   if (opts?.skills && opts.skills.length > 0) {
     tools.push(createSkillTool(opts.skills));
+  }
+
+  if (opts?.onEnterPlan) {
+    tools.push(createEnterPlanTool(opts.onEnterPlan));
+  }
+
+  if (opts?.onExitPlan) {
+    tools.push(createExitPlanTool(cwd, opts.onExitPlan));
   }
 
   return { tools, processManager };
@@ -73,5 +90,7 @@ export { createTaskOutputTool } from "./task-output.js";
 export { createTaskStopTool } from "./task-stop.js";
 export { createTasksTool } from "./tasks.js";
 export { createSkillTool } from "./skill.js";
+export { createEnterPlanTool } from "./enter-plan.js";
+export { createExitPlanTool } from "./exit-plan.js";
 export { ProcessManager } from "../core/process-manager.js";
 export { localOperations, type ToolOperations } from "./operations.js";

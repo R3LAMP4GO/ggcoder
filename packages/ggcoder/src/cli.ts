@@ -301,7 +301,25 @@ async function runInkTUI(opts: {
 
   // Build system prompt & tools (with sub-agent support)
   const systemPrompt = await buildSystemPrompt(cwd, skills);
-  const { tools, processManager } = createTools(cwd, { agents, skills, provider, model });
+
+  // Plan mode refs — shared between tools and UI
+  const planModeRef = { current: false };
+  const onEnterPlanRef: { current: (reason?: string) => void } = {
+    current: () => {},
+  };
+  const onExitPlanRef: { current: (planPath: string) => Promise<string> } = {
+    current: () => Promise.resolve("cancelled"),
+  };
+
+  const { tools, processManager } = createTools(cwd, {
+    agents,
+    skills,
+    provider,
+    model,
+    planModeRef,
+    onEnterPlan: (reason) => onEnterPlanRef.current(reason),
+    onExitPlan: (planPath) => onExitPlanRef.current(planPath),
+  });
 
   // Connect MCP servers
   const mcpManager = new MCPClientManager();
@@ -411,6 +429,10 @@ async function runInkTUI(opts: {
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
+    planModeRef,
+    onEnterPlanRef,
+    onExitPlanRef,
+    skills,
   });
 
   closeLogger();

@@ -25,6 +25,7 @@ interface InputAreaProps {
   onShiftTab?: () => void;
   onToggleTasks?: () => void;
   onToggleSkills?: () => void;
+  onTogglePlanMode?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
 }
@@ -84,6 +85,7 @@ export function InputArea({
   onShiftTab,
   onToggleTasks,
   onToggleSkills,
+  onTogglePlanMode,
   cwd,
   commands = [],
 }: InputAreaProps) {
@@ -190,15 +192,21 @@ export function InputArea({
 
   useInput(
     (input, key) => {
-      // Shift+` (tilde) toggles task overlay — works even while agent is running
-      if (input === "~") {
+      // Ctrl+T toggles task overlay — works even while agent is running
+      if (key.ctrl && input === "t") {
         onToggleTasks?.();
         return;
       }
 
-      // Shift+S toggles skills overlay
-      if (input === "S") {
+      // Ctrl+S toggles skills overlay
+      if (key.ctrl && input === "s") {
         onToggleSkills?.();
+        return;
+      }
+
+      // Ctrl+P toggles plan mode
+      if (key.ctrl && input === "p") {
+        onTogglePlanMode?.();
         return;
       }
 

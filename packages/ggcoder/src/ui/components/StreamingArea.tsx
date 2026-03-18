@@ -14,6 +14,7 @@ interface StreamingAreaProps {
   streamingThinking: string;
   showThinking?: boolean;
   thinkingMs?: number;
+  planMode?: boolean;
 }
 
 export function StreamingArea({
@@ -22,6 +23,7 @@ export function StreamingArea({
   streamingThinking,
   showThinking = true,
   thinkingMs,
+  planMode,
 }: StreamingAreaProps) {
   const theme = useTheme();
   const { columns } = useTerminalSize();
@@ -83,7 +85,9 @@ export function StreamingArea({
       {streamingText && (
         <Box flexDirection="row">
           <Box width={PREFIX_WIDTH} flexShrink={0}>
-            <Text color={theme.primary}>{"⏺ "}</Text>
+            <Text color={planMode ? theme.planPrimary : theme.primary}>
+              {planMode ? "⊞ " : "⏺ "}
+            </Text>
           </Box>
           <Box flexDirection="column" flexGrow={1} width={contentWidth}>
             <Markdown>

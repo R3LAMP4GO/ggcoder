@@ -24,6 +24,7 @@ import { ActivityIndicator } from "./components/ActivityIndicator.js";
 import { InputArea } from "./components/InputArea.js";
 import { Footer } from "./components/Footer.js";
 import { Banner } from "./components/Banner.js";
+import { PlanOverlay } from "./components/PlanOverlay.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { TaskOverlay } from "./components/TaskOverlay.js";
 import { SkillsOverlay } from "./components/SkillsOverlay.js";
@@ -42,6 +43,8 @@ import { shouldCompact, compact } from "../core/compaction/compactor.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
 import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
 import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
+import { buildSystemPrompt } from "../system-prompt.js";
+import type { Skill } from "../core/skills.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import { getMCPServers } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
@@ -420,6 +423,10 @@ export interface AppProps {
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
+  planModeRef?: { current: boolean };
+  onEnterPlanRef?: { current: (reason?: string) => void };
+  onExitPlanRef?: { current: (planPath: string) => Promise<string> };
+  skills?: Skill[];
 }
 
 // ── App Component ──────────────────────────────────────────
@@ -452,7 +459,7 @@ export function App(props: AppProps) {
   }, [isRestoredSession, props.initialHistory]);
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
-  const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | null>(null);
+  const [overlay, setOverlay] = useState<"model" | "tasks" | "skills" | "plan" | null>(null);
   const [taskCount, setTaskCount] = useState(() => getTaskCount(props.cwd));
   const [runAllTasks, setRunAllTasks] = useState(false);
   const runAllTasksRef = useRef(false);
@@ -471,6 +478,9 @@ export function App(props: AppProps) {
   const [currentTools, setCurrentTools] = useState(props.tools);
   const [thinkingEnabled, setThinkingEnabled] = useState(!!props.thinking);
   const messagesRef = useRef<Message[]>(props.messages);
+  const [planMode, setPlanMode] = useState(false);
+  const [planAutoExpand, setPlanAutoExpand] = useState(false);
+  const approvedPlanPathRef = useRef<string | undefined>(undefined);
   const nextIdRef = useRef(0);
   const sessionManagerRef = useRef(
     props.sessionsDir ? new SessionManager(props.sessionsDir) : null,
@@ -502,6 +512,67 @@ export function App(props: AppProps) {
   useEffect(() => {
     reloadCustomCommands();
   }, [reloadCustomCommands]);
+
+  // ── Plan mode wiring ─────────────────────────────────────
+  // Sync planModeRef with React state
+  useEffect(() => {
+    if (props.planModeRef) {
+      props.planModeRef.current = planMode;
+    }
+  }, [planMode, props.planModeRef]);
+
+  // Rebuild system prompt when plan mode changes
+  useEffect(() => {
+    void (async () => {
+      const newPrompt = await buildSystemPrompt(
+        props.cwd,
+        props.skills,
+        planMode,
+        approvedPlanPathRef.current,
+      );
+      if (messagesRef.current[0]?.role === "system") {
+        messagesRef.current[0] = {
+          role: "system" as const,
+          content: newPrompt,
+        };
+      }
+    })();
+  }, [planMode, props.cwd, props.skills]);
+
+  // Wire onEnterPlan callback ref
+  useEffect(() => {
+    if (props.onEnterPlanRef) {
+      props.onEnterPlanRef.current = (reason?: string) => {
+        setPlanMode(true);
+        const msg = reason ? `Plan mode activated: ${reason}` : "Plan mode activated";
+        setLiveItems((prev) => [...prev, { kind: "info", text: msg, id: getId() }]);
+      };
+    }
+  }, [props.onEnterPlanRef]);
+
+  // Wire onExitPlan callback ref
+  useEffect(() => {
+    if (props.onExitPlanRef) {
+      props.onExitPlanRef.current = async (planPath: string) => {
+        // Deactivate plan mode, store approved plan path, open pane
+        setPlanMode(false);
+        approvedPlanPathRef.current = planPath;
+        // Use setTimeout to open pane after the current tool execution completes,
+        // so the turn can finish and the UI transitions cleanly
+        setTimeout(() => {
+          stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+          setPlanAutoExpand(true);
+          setOverlay("plan");
+        }, 300);
+        return (
+          "Plan submitted. Exiting plan mode.\n" +
+          "The plan pane is opening for user review.\n" +
+          "Plan saved at: " +
+          planPath
+        );
+      };
+    }
+  }, [props.onExitPlanRef, stdout]);
 
   const persistNewMessages = useCallback(async () => {
     const sm = sessionManagerRef.current;
@@ -564,6 +635,7 @@ export function App(props: AppProps) {
           apiKey: compactApiKey,
           contextWindow,
           signal: undefined,
+          approvedPlanPath: approvedPlanPathRef.current,
         });
 
         // Replace spinner with completed notice
@@ -1177,6 +1249,32 @@ export function App(props: AppProps) {
         return;
       }
 
+      // Handle /plan — toggle plan mode
+      if (trimmed === "/plan" || trimmed === "/plan on") {
+        setPlanMode(true);
+        setLiveItems((prev) => [
+          ...prev,
+          { kind: "info", text: "Plan mode activated", id: getId() },
+        ]);
+        return;
+      }
+      if (trimmed === "/plan off") {
+        setPlanMode(false);
+        setLiveItems((prev) => [
+          ...prev,
+          { kind: "info", text: "Plan mode deactivated", id: getId() },
+        ]);
+        return;
+      }
+
+      // Handle /plans — open plan pane
+      if (trimmed === "/plans") {
+        stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+        setPlanAutoExpand(false);
+        setOverlay("plan");
+        return;
+      }
+
       // Handle prompt-template commands (built-in + custom from .gg/commands/)
       if (trimmed.startsWith("/")) {
         const parts = trimmed.slice(1).split(" ");
@@ -1450,6 +1548,8 @@ export function App(props: AppProps) {
       { name: "compact", aliases: ["c"], description: "Compact conversation" },
       { name: "clear", aliases: [], description: "Clear session and terminal" },
       { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
+      { name: "plan", aliases: [], description: "Toggle plan mode (on/off)" },
+      { name: "plans", aliases: [], description: "Open plans pane" },
       ...PROMPT_COMMANDS.map((cmd) => ({
         name: cmd.name,
         aliases: cmd.aliases,
@@ -1671,7 +1771,8 @@ export function App(props: AppProps) {
 
   const isTaskView = overlay === "tasks";
   const isSkillsView = overlay === "skills";
-  const isOverlayView = isTaskView || isSkillsView;
+  const isPlanView = overlay === "plan";
+  const isOverlayView = isTaskView || isSkillsView || isPlanView;
 
   return (
     <Box flexDirection="column">
@@ -1721,6 +1822,72 @@ export function App(props: AppProps) {
             setOverlay(null);
           }}
         />
+      ) : isPlanView ? (
+        <PlanOverlay
+          cwd={props.cwd}
+          autoExpandNewest={planAutoExpand}
+          onClose={() => {
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setStaticKey((k) => k + 1);
+            setPlanAutoExpand(false);
+            setOverlay(null);
+          }}
+          onApprove={(planPath) => {
+            // Store approved plan path — will be injected into the new system prompt
+            approvedPlanPathRef.current = planPath;
+
+            // Clear session for a fresh context focused on the plan
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setHistory([{ kind: "banner", id: "banner" }]);
+            setLiveItems([]);
+            setStaticKey((k) => k + 1);
+            setPlanAutoExpand(false);
+            setOverlay(null);
+
+            // Rebuild system prompt with the approved plan, then reset the session
+            void (async () => {
+              const newPrompt = await buildSystemPrompt(props.cwd, props.skills, false, planPath);
+              messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+              agentLoop.reset();
+              persistedIndexRef.current = messagesRef.current.length;
+
+              // Create a new session file
+              const sm = sessionManagerRef.current;
+              if (sm) {
+                const s = await sm.create(props.cwd, currentProvider, currentModel);
+                sessionPathRef.current = s.path;
+              }
+
+              // Start implementation with a clean context
+              setLiveItems([
+                {
+                  kind: "info",
+                  text: "Plan approved — starting fresh session for implementation",
+                  id: getId(),
+                },
+              ]);
+              setDoneStatus(null);
+              await agentLoop.run(
+                "The plan has been approved. Implement it now, following each step in order.",
+              );
+            })();
+          }}
+          onReject={(planPath, feedback) => {
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setStaticKey((k) => k + 1);
+            setPlanAutoExpand(false);
+            setOverlay(null);
+            // Send rejection + feedback to the agent
+            const msg =
+              `The plan at ${planPath} was rejected.\n\nFeedback: ${feedback}\n\n` +
+              `Please revise the plan based on this feedback.`;
+            setLiveItems((prev) => [
+              ...prev,
+              { kind: "info", text: `Plan rejected — "${feedback}"`, id: getId() },
+            ]);
+            void agentLoop.run(msg);
+          }}
+        />
       ) : (
         <>
           {/* Content area */}
@@ -1732,6 +1899,7 @@ export function App(props: AppProps) {
               streamingThinking={agentLoop.streamingThinking}
               showThinking={props.showThinking}
               thinkingMs={agentLoop.thinkingMs}
+              planMode={planMode}
             />
           </Box>
 
@@ -1758,6 +1926,7 @@ export function App(props: AppProps) {
                 tokenEstimate={agentLoop.streamedTokenEstimate}
                 userMessage={lastUserMessage}
                 activeToolNames={agentLoop.activeToolCalls.map((tc) => tc.name)}
+                planMode={planMode}
               />
             </Box>
           ) : (
@@ -1797,6 +1966,15 @@ export function App(props: AppProps) {
               stdout?.write("\x1b[2J\x1b[3J\x1b[H");
               setOverlay("skills");
             }}
+            onTogglePlanMode={() => {
+              const next = !planMode;
+              setPlanMode(next);
+              log("INFO", "plan", `Plan mode ${next ? "enabled" : "disabled"}`);
+              setLiveItems((items) => [
+                ...items,
+                { kind: "info", text: `Plan mode ${next ? "on" : "off"}`, id: getId() },
+              ]);
+            }}
             cwd={props.cwd}
             commands={allCommands}
           />
@@ -1815,6 +1993,7 @@ export function App(props: AppProps) {
               cwd={props.cwd}
               gitBranch={gitBranch}
               thinkingEnabled={thinkingEnabled}
+              planMode={planMode}
             />
           )}
           {bgTasks.length > 0 && (

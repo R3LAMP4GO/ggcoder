@@ -215,7 +215,7 @@ export function TaskOverlay({
     // ── Normal mode ──
 
     // Close overlay
-    if (key.escape || input === "~") {
+    if (key.escape) {
       onClose();
       return;
     }

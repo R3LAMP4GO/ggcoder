@@ -149,7 +149,7 @@ export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
 
   useInput((input, key) => {
     // Close overlay
-    if (key.escape || input === "S") {
+    if (key.escape) {
       onClose();
       return;
     }

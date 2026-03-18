@@ -16,6 +16,16 @@ const PULSE_COLORS = [
   "#38bdf8", // sky
   "#60a5fa", // blue (back)
 ];
+
+const PLAN_PULSE_COLORS = [
+  "#f59e0b", // amber
+  "#fbbf24", // amber light
+  "#f59e0b", // amber
+  "#d97706", // amber dark
+  "#f59e0b", // amber
+  "#fbbf24", // amber light
+  "#d97706", // amber dark
+];
 const PULSE_INTERVAL = 400;
 
 // ── Ellipsis animation ────────────────────────────────────
@@ -147,6 +157,16 @@ const CONTEXTUAL_PHRASES = [
       "Mapping the dep tree",
     ],
   },
+];
+
+const PLANNING_PHRASES = [
+  "Studying the codebase",
+  "Mapping the architecture",
+  "Drafting the plan",
+  "Analyzing dependencies",
+  "Charting the course",
+  "Surveying the landscape",
+  "Building the blueprint",
 ];
 
 const GENERAL_PHRASES = [
@@ -328,6 +348,7 @@ interface ActivityIndicatorProps {
   tokenEstimate: number;
   userMessage?: string;
   activeToolNames?: string[];
+  planMode?: boolean;
 }
 
 export function ActivityIndicator({
@@ -338,6 +359,7 @@ export function ActivityIndicator({
   tokenEstimate,
   userMessage = "",
   activeToolNames = [],
+  planMode,
 }: ActivityIndicatorProps) {
   const theme = useTheme();
 
@@ -359,20 +381,26 @@ export function ActivityIndicator({
   // Derive all animation frames from the single tick counter
   const spinnerFrame =
     Math.floor((tick * SHIMMER_INTERVAL) / SPINNER_INTERVAL) % SPINNER_FRAMES.length;
-  const colorFrame = Math.floor((tick * SHIMMER_INTERVAL) / PULSE_INTERVAL) % PULSE_COLORS.length;
+  const pulseColors = planMode ? PLAN_PULSE_COLORS : PULSE_COLORS;
+  const colorFrame = Math.floor((tick * SHIMMER_INTERVAL) / PULSE_INTERVAL) % pulseColors.length;
   const ellipsisFrame =
     Math.floor((tick * SHIMMER_INTERVAL) / ELLIPSIS_INTERVAL) % ELLIPSIS_FRAMES.length;
 
   // Phrase rotation — pick phrases based on phase + user message + active tools, shuffle, rotate
   const toolNamesKey = activeToolNames.sort().join(",");
   const phrases = useMemo(
-    () => shuffleArray(selectPhrases(phase, userMessage, activeToolNames)),
-    [phase, userMessage, toolNamesKey], // activeToolNames captured via stable string key
+    () =>
+      shuffleArray(
+        planMode && phase === "waiting"
+          ? PLANNING_PHRASES
+          : selectPhrases(phase, userMessage, activeToolNames),
+      ),
+    [phase, userMessage, toolNamesKey, planMode], // activeToolNames captured via stable string key
   );
   const phraseInterval = phase === "waiting" ? WAITING_PHRASE_INTERVAL : OTHER_PHRASE_INTERVAL;
   const phraseIndex = Math.floor((tick * SHIMMER_INTERVAL) / phraseInterval) % phrases.length;
 
-  const spinnerColor = PULSE_COLORS[colorFrame];
+  const spinnerColor = pulseColors[colorFrame];
   const phrase = phrases[phraseIndex] ?? phrases[0];
   const ellipsis = ELLIPSIS_FRAMES[ellipsisFrame];
 

@@ -9,6 +9,7 @@ interface FooterProps {
   cwd: string;
   gitBranch?: string | null;
   thinkingEnabled?: boolean;
+  planMode?: boolean;
 }
 
 // Model ID → short display name
@@ -61,7 +62,14 @@ const PARTIAL_BLOCKS = [
   "\u2588",
 ];
 
-export function Footer({ model, tokensIn, cwd, gitBranch, thinkingEnabled }: FooterProps) {
+export function Footer({
+  model,
+  tokensIn,
+  cwd,
+  gitBranch,
+  thinkingEnabled,
+  planMode,
+}: FooterProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
@@ -105,6 +113,10 @@ export function Footer({ model, tokensIn, cwd, gitBranch, thinkingEnabled }: Foo
     }
   }
 
+  // "Plan on" / "Plan off" + key hint (^P)
+  const planText = planMode ? "Plan on" : "Plan off";
+  const planLen = planText.length + 3 + 3; // " │ " separator + " ^P"
+
   // "Thinking on" / "Thinking off" + key hint (⇧⇹)
   const thinkingText = thinkingEnabled ? "Thinking on" : "Thinking off";
   const thinkingLen = thinkingText.length + 3 + 3; // " │ " separator + " ⇧⇹"
@@ -112,6 +124,7 @@ export function Footer({ model, tokensIn, cwd, gitBranch, thinkingEnabled }: Foo
   // Truncate path if footer would overflow
   const rightLen =
     modelName.length +
+    planLen +
     thinkingLen +
     3 +
     barWidth +
@@ -151,6 +164,9 @@ export function Footer({ model, tokensIn, cwd, gitBranch, thinkingEnabled }: Foo
         <Text color={theme.primary} bold>
           {modelName}
         </Text>
+        {sep}
+        <Text color={planMode ? theme.planPrimary : theme.textDim}>{planText}</Text>
+        <Text color={theme.border}>{" ^P"}</Text>
         {sep}
         <Text color={thinkingEnabled ? theme.accent : theme.textDim}>{thinkingText}</Text>
         <Text color={theme.border}>{" \u21E7\u21B9"}</Text>

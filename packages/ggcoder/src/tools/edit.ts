@@ -15,6 +15,7 @@ export function createEditTool(
   cwd: string,
   readFiles?: Set<string>,
   ops: ToolOperations = localOperations,
+  planModeRef?: { current: boolean },
 ): AgentTool<typeof EditParams> {
   return {
     name: "edit",
@@ -23,6 +24,9 @@ export function createEditTool(
       "The old_text must uniquely match exactly one location in the file. Returns a unified diff of the change.",
     parameters: EditParams,
     async execute({ file_path, old_text, new_text }) {
+      if (planModeRef?.current) {
+        return "Error: edit is restricted in plan mode. Use read-only tools to explore the codebase, then write your plan to .gg/plans/.";
+      }
       const resolved = resolvePath(cwd, file_path);
       await rejectSymlink(resolved);
 

@@ -7,7 +7,12 @@ const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "CONVENTIONS.md
 /**
  * Build the system prompt dynamically based on cwd and context.
  */
-export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<string> {
+export async function buildSystemPrompt(
+  cwd: string,
+  skills?: Skill[],
+  planMode?: boolean,
+  approvedPlanPath?: string,
+): Promise<string> {
   const sections: string[] = [];
 
   // 1. Identity
@@ -43,6 +48,46 @@ export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<
       `- If you encounter unexpected state (unfamiliar files, branches, locks), investigate before overwriting or deleting — it may be the user's in-progress work.`,
   );
 
+  // 2b. Plan mode
+  if (planMode) {
+    sections.push(
+      `## Plan Mode (ACTIVE)\n\n` +
+        `You are in PLAN MODE. Research and design an implementation plan before writing any code.\n\n` +
+        `### Workflow\n` +
+        `1. Explore: Use read, grep, find, ls to understand the codebase\n` +
+        `2. Research: Use web_fetch for documentation and best practices\n` +
+        `3. Draft: Write a structured plan to .gg/plans/<name>.md\n` +
+        `4. Submit: Call exit_plan with the plan path for user review\n\n` +
+        `### Rules\n` +
+        `- DO NOT use bash, edit, write (except to .gg/plans/), or subagent — they are restricted\n` +
+        `- Be specific: list exact file paths, function names, line numbers\n` +
+        `- Include step-by-step implementation order with dependencies\n` +
+        `- Note risks and verification criteria`,
+    );
+  }
+
+  // 2c. Approved plan — injected when a plan has been approved for implementation
+  if (approvedPlanPath && !planMode) {
+    let planContent = "";
+    try {
+      planContent = await fs.readFile(approvedPlanPath, "utf-8");
+    } catch {
+      // Plan file not found — skip injection
+    }
+    if (planContent.trim()) {
+      sections.push(
+        `## Approved Plan\n\n` +
+          `An approved implementation plan is available. Read and follow it strictly during implementation.\n\n` +
+          `**Plan file:** ${approvedPlanPath}\n\n` +
+          `<approved_plan>\n${planContent.trim()}\n</approved_plan>\n\n` +
+          `### Rules\n` +
+          `- Follow the plan's step-by-step implementation order\n` +
+          `- Do not deviate from the plan without user confirmation\n` +
+          `- If you encounter issues not covered by the plan, ask the user`,
+      );
+    }
+  }
+
   // 3. Code Quality
   sections.push(
     `## Code Quality\n\n` +
@@ -72,7 +117,9 @@ export async function buildSystemPrompt(cwd: string, skills?: Skill[]): Promise<
       `  - **prompt**: Standalone instruction sent to an agent with NO prior context. The agent must complete it from the prompt alone, so include specific file paths, what to change, and enough context to act without ambiguity. Be as long as needed for clarity, but no longer. If the task requires latest docs or APIs, tell the agent to research/fetch them.\n` +
       `  - **Ordering**: When creating multiple tasks (e.g. from a PRD or spec), add them in correct dependency order — foundational work first (types, schemas, config), then core logic, then integration, then UI, then tests. Each task should be completable independently given that prior tasks are done. Think like an engineer planning a project: what must exist before the next piece can be built?\n` +
       `- **skill**: Invoke a skill by name to get specialized instructions for a task. Skills are defined in \`.gg/skills/\` as markdown files. Use this tool when a task matches an available skill.\n` +
-      `- **mcp__grep__searchGitHub**: Search real-world code across 1M+ public GitHub repos. Use to verify your implementation against production patterns — check correct API usage, library idioms, and common conventions before finalizing changes. Search for literal code patterns (e.g. \`StreamableHTTPClientTransport(\`, \`useEffect(() =>\`), not keywords.`,
+      `- **mcp__grep__searchGitHub**: Search real-world code across 1M+ public GitHub repos. Use to verify your implementation against production patterns — check correct API usage, library idioms, and common conventions before finalizing changes. Search for literal code patterns (e.g. \`StreamableHTTPClientTransport(\`, \`useEffect(() =>\`), not keywords.\n` +
+      `- **enter_plan**: For complex multi-file tasks, call enter_plan to switch to plan mode for safe read-only exploration and planning.\n` +
+      `- **exit_plan**: Submit your plan for user review and exit plan mode.`,
   );
 
   // 5. Avoid

@@ -83,6 +83,7 @@ export function createBashTool(
   cwd: string,
   processManager: ProcessManager,
   ops: ToolOperations = localOperations,
+  planModeRef?: { current: boolean },
 ): AgentTool<typeof BashParams> {
   return {
     name: "bash",
@@ -96,6 +97,9 @@ export function createBashTool(
       "Use task_output/task_stop to interact with background processes.",
     parameters: BashParams,
     async execute({ command, timeout: timeoutMs, run_in_background }, context) {
+      if (planModeRef?.current) {
+        return "Error: bash is restricted in plan mode. Use read-only tools (read, grep, find, ls) to explore the codebase.";
+      }
       if (run_in_background) {
         const result = await processManager.start(command, cwd);
         return (

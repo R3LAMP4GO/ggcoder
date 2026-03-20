@@ -20,5 +20,7 @@
   "spinnerColor": "#60a5fa",
   "inputPrompt": "#60a5fa",
   "footerText": "#6b7280",
-  "commandColor": "#818cf8"
+  "commandColor": "#818cf8",
+  "planPrimary": "#f59e0b",
+  "planBorder": "#92400e"
 }

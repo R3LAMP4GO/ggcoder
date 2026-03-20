@@ -1,25 +1,33 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import {
   estimateTokens,
   estimateMessageTokens,
   estimateConversationTokens,
+  setEstimatorModel,
 } from "./token-estimator.js";
 import type { Message } from "@kenkaiiii/gg-ai";
+
+// Use a known model so the chars-per-token ratio is deterministic in tests.
+// "claude-sonnet-4-6" → ratio = 3.2
+beforeAll(() => {
+  setEstimatorModel("claude-sonnet-4-6");
+});
 
 describe("estimateTokens", () => {
   it("returns 0 for empty string", () => {
     expect(estimateTokens("")).toBe(0);
   });
 
-  it("estimates at ~4 chars per token", () => {
-    expect(estimateTokens("abcd")).toBe(1);
-    expect(estimateTokens("abcdefgh")).toBe(2);
-    expect(estimateTokens("abc")).toBe(1); // ceil(3/4) = 1
+  it("estimates using model-specific ratio", () => {
+    // claude ratio = 3.2
+    expect(estimateTokens("abc")).toBe(1); // ceil(3/3.2) = 1
+    expect(estimateTokens("abcdefgh")).toBe(3); // ceil(8/3.2) = 3
+    expect(estimateTokens("a".repeat(32))).toBe(10); // ceil(32/3.2) = 10
   });
 
   it("handles long text", () => {
     const text = "a".repeat(1000);
-    expect(estimateTokens(text)).toBe(250);
+    expect(estimateTokens(text)).toBe(313); // ceil(1000/3.2) = 313
   });
 });
 
@@ -27,8 +35,8 @@ describe("estimateMessageTokens", () => {
   it("estimates string content message", () => {
     const msg: Message = { role: "user", content: "Hello world" };
     const tokens = estimateMessageTokens(msg);
-    // ceil(11/4) = 3 + 4 overhead = 7
-    expect(tokens).toBe(7);
+    // ceil(11/3.2) = 4 + 4 overhead = 8
+    expect(tokens).toBe(8);
   });
 
   it("includes per-message overhead", () => {
@@ -43,7 +51,7 @@ describe("estimateMessageTokens", () => {
       content: [{ type: "text", text: "Hello" }],
     };
     const tokens = estimateMessageTokens(msg);
-    // ceil(5/4) = 2 + 4 overhead = 6
+    // ceil(5/3.2) = 2 + 4 overhead = 6
     expect(tokens).toBe(6);
   });
 
@@ -60,10 +68,10 @@ describe("estimateMessageTokens", () => {
       ],
     };
     const tokens = estimateMessageTokens(msg);
-    // name "read_file" = ceil(9/4) = 3
-    // args JSON '{"path":"/foo/bar.ts"}' = ceil(21/4) = 6
-    // + 4 overhead = 13
-    expect(tokens).toBe(13);
+    // name "read_file" = ceil(9/3.2) = 3
+    // args JSON '{"path":"/foo/bar.ts"}' = ceil(21/3.2) = 7
+    // + 4 overhead = 14
+    expect(tokens).toBe(14);
   });
 
   it("estimates tool result parts", () => {
@@ -78,8 +86,8 @@ describe("estimateMessageTokens", () => {
       ],
     };
     const tokens = estimateMessageTokens(msg);
-    // "file contents here" = ceil(18/4) = 5 + 4 overhead = 9
-    expect(tokens).toBe(9);
+    // "file contents here" = ceil(18/3.2) = 6 + 4 overhead = 10
+    expect(tokens).toBe(10);
   });
 
   it("sums multiple content parts", () => {
@@ -91,8 +99,8 @@ describe("estimateMessageTokens", () => {
       ],
     };
     const tokens = estimateMessageTokens(msg);
-    // ceil(19/4) = 5 + ceil(4/4) = 1 + 4 overhead = 10
-    expect(tokens).toBe(10);
+    // ceil(19/3.2) = 6 + ceil(4/3.2) = 2 + 4 overhead = 12
+    expect(tokens).toBe(12);
   });
 });
 
@@ -103,10 +111,10 @@ describe("estimateConversationTokens", () => {
 
   it("sums all message estimates", () => {
     const messages: Message[] = [
-      { role: "system", content: "You are helpful." }, // ceil(16/4)=4 + 4 = 8
-      { role: "user", content: "Hi" }, // ceil(2/4)=1 + 4 = 5
+      { role: "system", content: "You are helpful." }, // ceil(16/3.2)=5 + 4 = 9
+      { role: "user", content: "Hi" }, // ceil(2/3.2)=1 + 4 = 5
     ];
-    expect(estimateConversationTokens(messages)).toBe(13);
+    expect(estimateConversationTokens(messages)).toBe(14);
   });
 
   it("handles a full conversation with tool calls", () => {
@@ -127,5 +135,27 @@ describe("estimateConversationTokens", () => {
     expect(total).toBeGreaterThan(0);
     // Each message has at least 4 overhead tokens
     expect(total).toBeGreaterThanOrEqual(5 * 4);
+  });
+});
+
+describe("setEstimatorModel", () => {
+  it("uses different ratios for different model families", () => {
+    const text = "a".repeat(100);
+
+    setEstimatorModel("claude-opus-4-6");
+    const claudeTokens = estimateTokens(text); // 100/3.2 = 32
+
+    setEstimatorModel("gpt-4.1");
+    const gptTokens = estimateTokens(text); // 100/3.7 = 28
+
+    setEstimatorModel("glm-5");
+    const glmTokens = estimateTokens(text); // 100/2.5 = 40
+
+    // GLM should estimate MORE tokens (smaller chars/token ratio = more tokens per char)
+    expect(glmTokens).toBeGreaterThan(claudeTokens);
+    expect(claudeTokens).toBeGreaterThan(gptTokens);
+
+    // Reset for other tests
+    setEstimatorModel("claude-sonnet-4-6");
   });
 });

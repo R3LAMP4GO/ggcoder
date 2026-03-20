@@ -1,10 +1,11 @@
-import fs from "node:fs/promises";
 import path from "node:path";
+import fs from "node:fs/promises";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { resolvePath } from "./path-utils.js";
+import { resolvePath, rejectSymlink } from "./path-utils.js";
 import { truncateHead } from "./truncate.js";
 import { processImage } from "../utils/image.js";
+import { localOperations, type ToolOperations } from "./operations.js";
 
 /** Image extensions that the read tool can render as image content blocks. */
 const IMAGE_EXTENSIONS = new Set([
@@ -86,7 +87,11 @@ const ReadParams = z.object({
   limit: z.number().int().min(1).optional().describe("Maximum number of lines to read"),
 });
 
-export function createReadTool(cwd: string, readFiles?: Set<string>): AgentTool<typeof ReadParams> {
+export function createReadTool(
+  cwd: string,
+  readFiles?: Set<string>,
+  ops: ToolOperations = localOperations,
+): AgentTool<typeof ReadParams> {
   return {
     name: "read",
     description:
@@ -96,6 +101,7 @@ export function createReadTool(cwd: string, readFiles?: Set<string>): AgentTool<
     parameters: ReadParams,
     async execute({ file_path, offset, limit }) {
       const resolved = resolvePath(cwd, file_path);
+      await rejectSymlink(resolved);
       readFiles?.add(resolved);
       const ext = path.extname(resolved).toLowerCase();
 
@@ -116,11 +122,11 @@ export function createReadTool(cwd: string, readFiles?: Set<string>): AgentTool<
       }
 
       if (BINARY_EXTENSIONS.has(ext)) {
-        const stat = await fs.stat(resolved);
+        const stat = await ops.stat(resolved);
         return `Binary file: ${resolved} (${ext}, ${stat.size} bytes)`;
       }
 
-      const raw = await fs.readFile(resolved, "utf-8");
+      const raw = await ops.readFile(resolved);
       let lines = raw.split("\n");
 
       // Apply offset/limit

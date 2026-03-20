@@ -1,6 +1,8 @@
 import React from "react";
-import { Text, Box, useStdout } from "ink";
+import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
+import { useTerminalSize } from "../hooks/useTerminalSize.js";
+import { getContextWindow } from "../../core/model-registry.js";
 
 interface FooterProps {
   model: string;
@@ -9,6 +11,7 @@ interface FooterProps {
   gitBranch?: string | null;
   thinkingEnabled?: boolean;
   planModeActive?: boolean;
+  planMode?: boolean;
 }
 
 // Model ID → short display name
@@ -24,25 +27,12 @@ const MODEL_SHORT_NAMES: Record<string, string> = {
   "o4-mini": "o4-mini",
 };
 
-// Model ID → context window size in tokens
-const MODEL_CONTEXT_LIMITS: Record<string, number> = {
-  "claude-opus-4-6": 200_000,
-  "claude-sonnet-4-6": 200_000,
-  "claude-haiku-4-5": 200_000,
-  "claude-haiku-4-5-20251001": 200_000,
-  "gpt-4.1": 1_000_000,
-  "gpt-4.1-mini": 1_000_000,
-  "gpt-4.1-nano": 1_000_000,
-  o3: 200_000,
-  "o4-mini": 200_000,
-};
-
 function getShortModelName(model: string): string {
   return MODEL_SHORT_NAMES[model] ?? model;
 }
 
 function getContextPercent(model: string, tokensIn: number): number {
-  const limit = MODEL_CONTEXT_LIMITS[model];
+  const limit = getContextWindow(model);
   if (!limit || tokensIn === 0) return 0;
   return Math.round((tokensIn / limit) * 100);
 }
@@ -81,10 +71,10 @@ export function Footer({
   gitBranch,
   thinkingEnabled,
   planModeActive,
+  planMode,
 }: FooterProps) {
   const theme = useTheme();
-  const { stdout } = useStdout();
-  const columns = stdout?.columns ?? 80;
+  const { columns } = useTerminalSize();
 
   // Show only last 2 path segments (project folder + immediate parent)
   const parts = cwd.split("/").filter(Boolean);
@@ -125,39 +115,87 @@ export function Footer({
     }
   }
 
-  // Mode indicators: thinking toggle
-  const thinkingText = thinkingEnabled ? "Thinking on" : "Thinking off";
-  const planText = planModeActive ? " · 📋 Plan" : "";
-  const modeText = thinkingText + planText;
-  const modeLen = modeText.length + 3; // " │ " separator
+  // "Plan on" / "Plan off" + key hint (^P)
+  const planText = planMode ? "Plan on" : "Plan off";
 
-  // Truncate path if footer would overflow
+  // "Thinking on" / "Thinking off" + key hint (⇧⇹)
+  const thinkingText = thinkingEnabled ? "Thinking on" : "Thinking off";
+
+  // Calculate whether everything fits on one line.
+  // Left: path + separator + branch.  Right: tokens + bar + model + plan + thinking.
+  const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0); // 2 = paddingLeft+Right
   const rightLen =
-    modelName.length +
-    modeLen +
-    3 +
+    formatTokens(tokensIn).length +
+    3 + // sep
     barWidth +
     1 +
     String(contextPct).length +
-    1 +
-    (gitBranch ? gitBranch.length + 5 : 0) +
-    formatTokens(tokensIn).length +
-    3 +
-    10;
-  const maxPath = columns - rightLen - 4;
+    1 + // " N%"
+    3 + // sep
+    modelName.length +
+    3 + // sep
+    planText.length +
+    3 + // " ^P"
+    3 + // sep
+    thinkingText.length +
+    3; // " ⇧⇹"
+  const availableWidth = columns - 2; // paddingLeft + paddingRight
+  const fitsOnOneLine = leftLen + rightLen <= availableWidth;
+
+  // Truncate path only when single-line and it's the path that's too long
+  const maxPath = fitsOnOneLine ? availableWidth - rightLen - 2 : availableWidth;
   const truncPath =
     displayPath.length > maxPath && maxPath > 10
       ? "\u2026" + displayPath.slice(displayPath.length - maxPath + 1)
       : displayPath;
 
+  if (fitsOnOneLine) {
+    // Single-line layout: left grows, right is fixed
+    return (
+      <Box paddingLeft={1} paddingRight={1} width={columns}>
+        <Box flexGrow={1}>
+          <Text color={theme.textDim}>{truncPath}</Text>
+          {gitBranch && (
+            <>
+              {sep}
+              <Text color={theme.secondary}>
+                {"\u2387 "}
+                {gitBranch}
+              </Text>
+            </>
+          )}
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={theme.textDim}>{formatTokens(tokensIn)}</Text>
+          {sep}
+          <Text>{barChars}</Text>
+          <Text color={contextColor}> {contextPct}%</Text>
+          {sep}
+          <Text color={theme.primary} bold>
+            {modelName}
+          </Text>
+          {sep}
+          <Text color={planMode ? theme.planPrimary : theme.textDim}>{planText}</Text>
+          <Text color={theme.border}>{" ^P"}</Text>
+          {sep}
+          <Text color={thinkingEnabled ? theme.accent : theme.textDim}>{thinkingText}</Text>
+          <Text color={theme.border}>{" \u21E7\u21B9"}</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  // Two-line layout: wrap right-side items below the left side
   return (
-    <Box paddingLeft={1} paddingRight={1}>
-      <Box flexGrow={1}>
-        <Text color={theme.textDim}>{truncPath}</Text>
+    <Box flexDirection="column" paddingLeft={1} paddingRight={1} width={columns}>
+      <Box>
+        <Text color={theme.textDim} wrap="truncate">
+          {truncPath}
+        </Text>
         {gitBranch && (
           <>
             {sep}
-            <Text color={theme.secondary}>
+            <Text color={theme.secondary} wrap="truncate">
               {"\u2387 "}
               {gitBranch}
             </Text>
@@ -173,6 +211,9 @@ export function Footer({
         <Text color={theme.primary} bold>
           {modelName}
         </Text>
+        {sep}
+        <Text color={planMode ? theme.planPrimary : theme.textDim}>{planText}</Text>
+        <Text color={theme.border}>{" ^P"}</Text>
         {sep}
         <Text color={thinkingEnabled ? theme.accent : theme.textDim}>{thinkingText}</Text>
         {planModeActive && <Text color={theme.warning}>{" · 📋 Plan"}</Text>}

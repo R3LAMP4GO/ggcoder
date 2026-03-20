@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Text, Box, useInput, useStdout, useStdin, useApp } from "ink";
 import type { EventEmitter } from "events";
 import { useTheme } from "../theme/theme.js";
+import { useAnimationTick, deriveFrame } from "./AnimationContext.js";
+import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import type { ImageAttachment } from "../../utils/image.js";
 import {
   extractImagePaths,
@@ -32,12 +34,17 @@ interface InputAreaProps {
   onShiftTab?: () => void;
   onTogglePlan?: () => void;
   onToggleTasks?: () => void;
+  onToggleSkills?: () => void;
+  onTogglePlanMode?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
 }
 
 // Border (1 each side) + padding (1 each side) = 4 characters of overhead
 const BOX_OVERHEAD = 4;
+// Minimum content width to prevent zero/negative values that cause infinite
+// re-render loops when Ink tries to wrap text wider than available space.
+const MIN_CONTENT_WIDTH = 10;
 
 /**
  * Split text into visual lines based on terminal width.
@@ -69,8 +76,7 @@ function wrapLine(text: string, contentWidth: number): string[] {
 }
 
 function getVisualLines(text: string, columns: number): string[] {
-  const contentWidth = columns - PROMPT.length - BOX_OVERHEAD;
-  if (contentWidth <= 0) return [text];
+  const contentWidth = Math.max(MIN_CONTENT_WIDTH, columns - PROMPT.length - BOX_OVERHEAD);
   if (text.length === 0) return [""];
 
   // Split on real newlines first, then wrap each
@@ -92,6 +98,8 @@ export function InputArea({
   onShiftTab,
   onTogglePlan,
   onToggleTasks,
+  onToggleSkills,
+  onTogglePlanMode,
   cwd,
   commands = [],
 }: InputAreaProps) {
@@ -106,8 +114,7 @@ export function InputArea({
   const historyRef = useRef<Array<{ text: string; images: ImageAttachment[] }>>([]);
   const historyIndexRef = useRef(-1);
   const lastEscRef = useRef(0);
-  const { stdout } = useStdout();
-  const columns = stdout?.columns ?? 80;
+  const { columns } = useTerminalSize();
   const [menuIndex, setMenuIndex] = useState(0);
   const [pasteText, setPasteText] = useState(""); // accumulated pasted content
   const [pasteOffset, setPasteOffset] = useState(0); // where in value the paste starts
@@ -131,23 +138,12 @@ export function InputArea({
     () => [theme.primary, theme.accent, theme.secondary, theme.accent],
     [theme.primary, theme.accent, theme.secondary],
   );
-  const [borderFrame, setBorderFrame] = useState(0);
-  useEffect(() => {
-    if (disabled) return;
-    const timer = setInterval(() => {
-      setBorderFrame((f) => (f + 1) % borderPulseColors.length);
-    }, 800);
-    return () => clearInterval(timer);
-  }, [disabled, borderPulseColors]);
 
-  // Cursor blink — always active so user can type while agent is busy
-  const [cursorVisible, setCursorVisible] = useState(true);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setCursorVisible((v) => !v);
-    }, 530);
-    return () => clearInterval(timer);
-  }, []);
+  // Derive border pulse and cursor blink from global animation tick
+  const tick = useAnimationTick();
+  const borderFrame = disabled ? 0 : deriveFrame(tick, 800, borderPulseColors.length);
+  // Cursor blink: ~530ms period → visible for ~500ms, hidden for ~500ms
+  const cursorVisible = !isActive || deriveFrame(tick, 530, 2) === 0;
 
   // Auto-clear image status message after 3 seconds
   useEffect(() => {
@@ -220,9 +216,21 @@ export function InputArea({
 
   useInput(
     (input, key) => {
-      // Shift+` (tilde) toggles task overlay — works even while agent is running
-      if (input === "~") {
+      // Ctrl+T toggles task overlay — works even while agent is running
+      if (key.ctrl && input === "t") {
         onToggleTasks?.();
+        return;
+      }
+
+      // Ctrl+S toggles skills overlay
+      if (key.ctrl && input === "s") {
+        onToggleSkills?.();
+        return;
+      }
+
+      // Ctrl+P toggles plan mode
+      if (key.ctrl && input === "p") {
+        onTogglePlanMode?.();
         return;
       }
 
@@ -231,8 +239,8 @@ export function InputArea({
           onAbort();
           return;
         }
-        // When disabled (agent running), allow typing but block submission
-        if (key.return) return;
+        // When disabled (agent running), allow typing AND submission.
+        // Submitted messages will be queued by the parent component.
       }
 
       if (key.return && (key.shift || key.meta)) {
@@ -284,18 +292,6 @@ export function InputArea({
         return;
       }
 
-      // Option+Tab — toggle plan mode
-      if (key.meta && key.tab) {
-        onTogglePlan?.();
-        return;
-      }
-
-      // Ctrl+P — toggle plan mode (alternate binding)
-      if (key.ctrl && input === "p") {
-        onTogglePlan?.();
-        return;
-      }
-
       // Ctrl+V — paste image from clipboard (like Claude Code)
       // Check clipboard for image first; if none, let text paste through normally
       if (key.ctrl && input === "v") {
@@ -316,25 +312,6 @@ export function InputArea({
           })
           .catch(() => {
             // Clipboard check failed — ignore
-          })
-          .finally(() => {
-            pastingRef.current = false;
-          });
-        return;
-      }
-
-      // Ctrl+I — paste image from clipboard (alternative binding)
-      if (key.ctrl && input === "i") {
-        if (pastingRef.current) return;
-        pastingRef.current = true;
-        getClipboardImage()
-          .then((img) => {
-            if (img) {
-              setImages((prev) => [...prev, img]);
-              setImageStatus(`📎 Image pasted`);
-            } else {
-              setImageStatus(getNoImageMessage());
-            }
           })
           .finally(() => {
             pastingRef.current = false;
@@ -541,7 +518,7 @@ export function InputArea({
 
   // Calculate visual lines and cap at MAX_VISIBLE_LINES (scroll to cursor)
   const visualLines = getVisualLines(value, columns);
-  const contentWidth = columns - PROMPT.length - BOX_OVERHEAD;
+  const contentWidth = Math.max(MIN_CONTENT_WIDTH, columns - PROMPT.length - BOX_OVERHEAD);
 
   // Find which visual line and column the cursor is on
   const cursorLineInfo = useMemo(() => {
@@ -549,7 +526,7 @@ export function InputArea({
     const hardLines = value.split("\n");
     let visualLineIndex = 0;
     for (let h = 0; h < hardLines.length; h++) {
-      const wrapped = wrapLine(hardLines[h], contentWidth > 0 ? contentWidth : value.length + 1);
+      const wrapped = wrapLine(hardLines[h], contentWidth);
       for (let w = 0; w < wrapped.length; w++) {
         const lineLen = wrapped[w].length;
         const lineStart = pos;
@@ -626,7 +603,7 @@ export function InputArea({
   }, [value, isCommand, knownCommandNames]);
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={columns}>
       <Box
         flexDirection="column"
         borderStyle="round"

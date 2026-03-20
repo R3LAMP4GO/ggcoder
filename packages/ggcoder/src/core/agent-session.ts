@@ -1,4 +1,4 @@
-import { agentLoop, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
+import { agentLoop, isAbortError, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
 import { ProviderError, type Message, type Provider, type ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { EventBus } from "./event-bus.js";
 import {
@@ -6,9 +6,11 @@ import {
   createBuiltinCommands,
   type SlashCommandContext,
 } from "./slash-commands.js";
+import { PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
+import { loadCustomCommands } from "./custom-commands.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
-import { SessionManager, type MessageEntry } from "./session-manager.js";
+import { SessionManager, type MessageEntry, type BranchInfo } from "./session-manager.js";
 import { ExtensionLoader } from "./extensions/loader.js";
 import type { ExtensionContext } from "./extensions/types.js";
 import { shouldCompact, compact } from "./compaction/compactor.js";
@@ -19,7 +21,11 @@ import { buildSystemPrompt } from "../system-prompt.js";
 import { createTools, type ProcessManager } from "../tools/index.js";
 import { MCPClientManager, getMCPServers } from "./mcp/index.js";
 import { log } from "./logger.js";
+import { setEstimatorModel } from "./compaction/token-estimator.js";
+import { discoverAgents } from "./agents.js";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 // ── Options ────────────────────────────────────────────────
 
@@ -79,6 +85,8 @@ export class AgentSession {
   private sessionId = "";
   private sessionPath = "";
   private lastPersistedIndex = 0;
+  /** Current leaf entry ID in the session DAG — used to chain parentIds for branching. */
+  private currentLeafId: string | null = null;
 
   private opts: AgentSessionOptions;
 
@@ -94,6 +102,9 @@ export class AgentSession {
   }
 
   async initialize(): Promise<void> {
+    // Set model for accurate token estimation
+    setEstimatorModel(this.model);
+
     const paths = await ensureAppDirs();
 
     // Load settings & auth
@@ -106,6 +117,12 @@ export class AgentSession {
     // Session manager
     this.sessionManager = new SessionManager(paths.sessionsDir);
 
+    // Ensure project-local .gg directories exist
+    const localGGDir = path.join(this.cwd, ".gg");
+    await fs.mkdir(path.join(localGGDir, "skills"), { recursive: true });
+    await fs.mkdir(path.join(localGGDir, "commands"), { recursive: true });
+    await fs.mkdir(path.join(localGGDir, "agents"), { recursive: true });
+
     // Discover skills
     this.skills = await discoverSkills({
       globalSkillsDir: paths.skillsDir,
@@ -116,8 +133,18 @@ export class AgentSession {
     const basePrompt = this.customSystemPrompt ?? (await buildSystemPrompt(this.cwd, this.skills));
     this.messages = [{ role: "system", content: basePrompt }];
 
-    // Create tools
-    const { tools, processManager } = createTools(this.cwd);
+    // Discover agents and create tools (with sub-agent support)
+    const agents = await discoverAgents({
+      globalAgentsDir: paths.agentsDir,
+      projectDir: this.cwd,
+    });
+    const { tools, processManager } = createTools(this.cwd, {
+      agents,
+      skills: this.skills,
+      provider: this.provider,
+      model: this.model,
+    });
+    this.tools = tools;
     this.processManager = processManager;
 
     // Apply tool restrictions (for subagent processes with --restricted-tools)
@@ -170,16 +197,39 @@ export class AgentSession {
       this.slashCommands.register(cmd);
     }
 
-    // Wire up /help to show all registered commands
+    // Wire up /help to show all registered + prompt + custom commands
     const helpCmd = this.slashCommands.get("help");
     if (helpCmd) {
       const registry = this.slashCommands;
-      helpCmd.execute = () => {
+      const cwd = this.cwd;
+      helpCmd.execute = async () => {
         const all = registry.getAll();
         const lines = all.map(
           (c) =>
             `  /${c.name}${c.aliases.length ? ` (${c.aliases.map((a) => "/" + a).join(", ")})` : ""} — ${c.description}`,
         );
+
+        // Add prompt-template commands
+        if (PROMPT_COMMANDS.length > 0) {
+          lines.push("");
+          lines.push("Prompt commands:");
+          for (const cmd of PROMPT_COMMANDS) {
+            lines.push(
+              `  /${cmd.name}${cmd.aliases.length ? ` (${cmd.aliases.map((a) => "/" + a).join(", ")})` : ""} — ${cmd.description}`,
+            );
+          }
+        }
+
+        // Add custom commands from .gg/commands/
+        const customCmds = await loadCustomCommands(cwd);
+        if (customCmds.length > 0) {
+          lines.push("");
+          lines.push("Custom commands:");
+          for (const cmd of customCmds) {
+            lines.push(`  /${cmd.name} — ${cmd.description}`);
+          }
+        }
+
         return "Available commands:\n" + lines.join("\n");
       };
     }
@@ -204,6 +254,28 @@ export class AgentSession {
     // Check for slash commands
     const parsed = this.slashCommands.parse(content);
     if (parsed) {
+      // Check prompt-template commands first (built-in + custom)
+      const builtinPromptCmd = getPromptCommand(parsed.name);
+      const customCmds = await loadCustomCommands(this.cwd);
+      const customPromptCmd = !builtinPromptCmd
+        ? customCmds.find((c) => c.name === parsed.name)
+        : undefined;
+      const promptText = builtinPromptCmd?.prompt ?? customPromptCmd?.prompt;
+
+      if (promptText) {
+        // Inject the prompt-template command as a user message to the agent
+        const fullPrompt = parsed.args
+          ? `${promptText}\n\n## User Instructions\n\n${parsed.args}`
+          : promptText;
+        // Run as a normal prompt (push message + agent loop)
+        const userMessage: Message = { role: "user", content: fullPrompt };
+        this.messages.push(userMessage);
+        await this.persistMessage(userMessage);
+        this.lastPersistedIndex = this.messages.length;
+        await this.runLoop();
+        return;
+      }
+
       const cmdContext = this.createSlashCommandContext();
       const result = await this.slashCommands.execute(content, cmdContext);
       if (result) {
@@ -218,6 +290,11 @@ export class AgentSession {
     await this.persistMessage(userMessage);
     this.lastPersistedIndex = this.messages.length;
 
+    await this.runLoop();
+  }
+
+  /** Auto-compact if needed, run agent loop with auth retry, and persist messages. */
+  private async runLoop(): Promise<void> {
     // Auto-compact if needed
     if (this.settingsManager.get("autoCompact")) {
       const contextWindow = getContextWindow(this.model);
@@ -255,6 +332,10 @@ export class AgentSession {
     try {
       await runAgentLoop(creds.accessToken, creds.accountId);
     } catch (err) {
+      // Abort errors are expected (user cancellation) — don't retry or re-throw
+      if (isAbortError(err) || this.opts.signal?.aborted) {
+        return;
+      }
       if (err instanceof ProviderError && err.statusCode === 401) {
         log("INFO", "auth", "Got 401, force-refreshing token and retrying");
         creds = await this.authStorage.resolveCredentials(this.provider, { forceRefresh: true });
@@ -275,6 +356,7 @@ export class AgentSession {
     const prevProvider = this.provider;
     if (provider) this.provider = provider as Provider;
     this.model = model;
+    setEstimatorModel(model);
     this.eventBus.emit("model_change", { provider: this.provider, model: this.model });
 
     // Reconnect MCP servers when provider changes (e.g. GLM needs Z.AI tools, others don't)
@@ -323,7 +405,19 @@ export class AgentSession {
     });
 
     this.messages = result.messages;
-    this.lastPersistedIndex = 0; // Re-persist all after compaction
+
+    // Persist compacted messages to a new session file so `ggcoder continue`
+    // picks up the compacted state instead of the full original history.
+    const session = await this.sessionManager.create(this.cwd, this.provider, this.model);
+    this.sessionId = session.id;
+    this.sessionPath = session.path;
+
+    // Write compacted messages (skip system — it's rebuilt on load)
+    for (const msg of this.messages) {
+      if (msg.role === "system") continue;
+      await this.persistMessage(msg);
+    }
+    this.lastPersistedIndex = this.messages.length;
 
     this.eventBus.emit("compaction_end", {
       originalCount: result.result.originalCount,
@@ -343,6 +437,56 @@ export class AgentSession {
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
   }
 
+  /**
+   * Create a branch at a specific point in the conversation.
+   * Rewinds the message history to the given entry and sets the leaf
+   * so new messages fork from that point.
+   *
+   * @param stepsBack Number of messages to rewind (default: 2 — backs up past last assistant + tool)
+   */
+  async branch(stepsBack = 2): Promise<{ branchedFrom: number; messagesKept: number }> {
+    // Load the full session to access the DAG
+    const loaded = await this.sessionManager.load(this.sessionPath);
+    const branch = this.sessionManager.getBranch(loaded.entries, this.currentLeafId);
+
+    // Walk back stepsBack message entries
+    const messageEntries = branch.filter((e) => e.type === "message");
+    const targetIndex = Math.max(0, messageEntries.length - stepsBack);
+
+    if (targetIndex === 0) {
+      throw new Error("Cannot branch — already at the start of the conversation.");
+    }
+
+    // Set leaf to the entry just before the branch point
+    const newLeafEntry = messageEntries[targetIndex - 1]!;
+    this.currentLeafId = newLeafEntry.id;
+    await this.sessionManager.updateLeaf(this.sessionPath, newLeafEntry.id);
+
+    // Rebuild messages from the new branch
+    const branchMessages = this.sessionManager.getMessages(loaded.entries, this.currentLeafId);
+    const systemMsg = this.messages[0];
+    this.messages = [systemMsg, ...branchMessages];
+    this.lastPersistedIndex = this.messages.length;
+
+    this.eventBus.emit("branch_created", {
+      leafId: this.currentLeafId,
+      messagesKept: branchMessages.length,
+    });
+
+    return {
+      branchedFrom: messageEntries.length,
+      messagesKept: branchMessages.length,
+    };
+  }
+
+  /**
+   * List all branches in the current session.
+   */
+  async listBranches(): Promise<BranchInfo[]> {
+    const loaded = await this.sessionManager.load(this.sessionPath);
+    return this.sessionManager.listBranches(loaded.entries);
+  }
+
   getState(): AgentSessionState {
     return {
       provider: this.provider,
@@ -358,10 +502,18 @@ export class AgentSession {
     return this.messages;
   }
 
+  /** Replace the abort signal (e.g. after cancellation). */
+  setSignal(signal: AbortSignal): void {
+    this.opts = { ...this.opts, signal };
+  }
+
   async dispose(): Promise<void> {
     this.processManager?.shutdownAll();
     await this.mcpManager?.dispose();
     await this.extensionLoader.deactivateAll();
+    this.eventBus.removeAllListeners();
+    this.messages = [];
+    this.tools = [];
   }
 
   // ── Private ────────────────────────────────────────────
@@ -375,33 +527,61 @@ export class AgentSession {
 
   private async loadExistingSession(sessionPath: string): Promise<void> {
     const loaded = await this.sessionManager.load(sessionPath);
-    const loadedMessages = this.sessionManager.getMessages(loaded.entries);
+    // Use the leaf from the header to walk the correct branch
+    const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
+
+    // Track the current leaf for subsequent entries
+    this.currentLeafId = loaded.header.leafId;
 
     // Rebuild messages: keep system, add loaded
     const systemMsg = this.messages[0]; // Already built
     this.messages = [systemMsg, ...loadedMessages];
+
+    // Auto-compact on load if the restored session exceeds the context window.
+    // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
+    const contextWindow = getContextWindow(this.model);
+    if (shouldCompact(this.messages, contextWindow, 0.8)) {
+      log("INFO", "session", `Restored session exceeds context — auto-compacting`);
+      const creds = await this.authStorage.resolveCredentials(this.provider);
+      const compacted = await compact(this.messages, {
+        provider: this.provider,
+        model: this.model,
+        apiKey: creds.accessToken,
+        contextWindow,
+        signal: this.opts.signal,
+      });
+      this.messages = compacted.messages;
+      log("INFO", "session", `Auto-compaction complete`, {
+        before: String(compacted.result.originalCount),
+        after: String(compacted.result.newCount),
+      });
+    }
 
     // Create new session file for continuation
     const session = await this.sessionManager.create(this.cwd, this.provider, this.model);
     this.sessionId = session.id;
     this.sessionPath = session.path;
 
-    // Re-persist loaded messages
-    for (const msg of loadedMessages) {
+    // Re-persist (compacted) messages — skip system, it's rebuilt on load
+    for (const msg of this.messages) {
+      if (msg.role === "system") continue;
       await this.persistMessage(msg);
     }
     this.lastPersistedIndex = this.messages.length;
   }
 
   private async persistMessage(message: Message): Promise<void> {
+    const entryId = crypto.randomUUID();
     const entry: MessageEntry = {
       type: "message",
-      id: crypto.randomUUID(),
-      parentId: null,
+      id: entryId,
+      parentId: this.currentLeafId,
       timestamp: new Date().toISOString(),
       message,
     };
     await this.sessionManager.appendEntry(this.sessionPath, entry);
+    this.currentLeafId = entryId;
+    await this.sessionManager.updateLeaf(this.sessionPath, entryId);
   }
 
   private createSlashCommandContext(): SlashCommandContext {
@@ -432,6 +612,19 @@ export class AgentSession {
       },
       quit: () => {
         process.exit(0);
+      },
+      branch: async (stepsBack?: number) => {
+        const result = await this.branch(stepsBack);
+        return `Branched: rewound from ${result.branchedFrom} to ${result.messagesKept} messages. New messages will fork from here.`;
+      },
+      listBranches: async () => {
+        const branches = await this.listBranches();
+        if (branches.length <= 1) return "No branches — conversation is linear.";
+        const lines = branches.map(
+          (b, i) =>
+            `  ${i + 1}. ${b.leafId.slice(0, 8)} — ${b.entryCount} entries (${b.leafId === this.currentLeafId ? "active" : "inactive"})`,
+        );
+        return `${branches.length} branch(es):\n${lines.join("\n")}`;
       },
     };
   }

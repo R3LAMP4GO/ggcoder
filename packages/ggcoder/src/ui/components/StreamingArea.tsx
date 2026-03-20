@@ -3,6 +3,10 @@ import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { Markdown } from "./Markdown.js";
 import { ThinkingBlock } from "./ThinkingBlock.js";
+import { useTerminalSize } from "../hooks/useTerminalSize.js";
+
+// "⏺ " prefix = 2 chars
+const PREFIX_WIDTH = 2;
 
 interface StreamingAreaProps {
   isRunning: boolean;
@@ -10,6 +14,7 @@ interface StreamingAreaProps {
   streamingThinking: string;
   showThinking?: boolean;
   thinkingMs?: number;
+  planMode?: boolean;
 }
 
 export function StreamingArea({
@@ -18,8 +23,11 @@ export function StreamingArea({
   streamingThinking,
   showThinking = true,
   thinkingMs,
+  planMode,
 }: StreamingAreaProps) {
   const theme = useTheme();
+  const { columns } = useTerminalSize();
+  const contentWidth = Math.max(10, columns - PREFIX_WIDTH);
 
   // Blinking cursor — only blink when text is NOT actively changing.
   // While text streams, the reveal animation already provides visual feedback,
@@ -37,7 +45,8 @@ export function StreamingArea({
   useEffect(() => {
     if (streamingText !== prevTextRef.current) {
       prevTextRef.current = streamingText;
-      setTextStale(false);
+      // Only trigger a re-render if we're transitioning from stale → active
+      if (textStale) setTextStale(false);
       if (staleTimerRef.current) clearTimeout(staleTimerRef.current);
       staleTimerRef.current = setTimeout(() => {
         setTextStale(true);
@@ -46,7 +55,7 @@ export function StreamingArea({
     return () => {
       if (staleTimerRef.current) clearTimeout(staleTimerRef.current);
     };
-  }, [streamingText]);
+  }, [streamingText]); // textStale intentionally omitted — we only read it to gate the setState
 
   useEffect(() => {
     if (!isRunning || !textStale) {
@@ -74,9 +83,13 @@ export function StreamingArea({
       )}
 
       {streamingText && (
-        <Box flexShrink={1}>
-          <Text color={theme.primary}>{"⏺ "}</Text>
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} flexBasis={0}>
+        <Box flexDirection="row">
+          <Box width={PREFIX_WIDTH} flexShrink={0}>
+            <Text color={planMode ? theme.planPrimary : theme.primary}>
+              {planMode ? "⊞ " : "⏺ "}
+            </Text>
+          </Box>
+          <Box flexDirection="column" flexGrow={1} width={contentWidth}>
             <Markdown>
               {streamingText.trimStart() + (isRunning && cursorVisible ? "\u258D" : "")}
             </Markdown>

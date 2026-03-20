@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,9 +6,61 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import { killProcessTree } from "../utils/process.js";
 import { truncateTail } from "./truncate.js";
+import { localOperations, type ToolOperations } from "./operations.js";
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
+
+/** Environment variables safe to inherit. Everything else is stripped to prevent leaking secrets to LLM. */
+const ENV_ALLOWLIST = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_RUNTIME_DIR",
+  "EDITOR",
+  "VISUAL",
+  "PAGER",
+  "CLICOLOR",
+  "CLICOLOR_FORCE",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  // Development toolchains
+  "NODE_PATH",
+  "NVM_DIR",
+  "NPM_CONFIG_PREFIX",
+  "PNPM_HOME",
+  "GOPATH",
+  "GOROOT",
+  "CARGO_HOME",
+  "RUSTUP_HOME",
+  "PYENV_ROOT",
+  "VIRTUAL_ENV",
+  "CONDA_DEFAULT_ENV",
+  "CONDA_PREFIX",
+  "JAVA_HOME",
+  "ANDROID_HOME",
+  "ANDROID_SDK_ROOT",
+  "RUBY_VERSION",
+  "GEM_HOME",
+  "RBENV_ROOT",
+]);
+
+function getSafeEnv(): Record<string, string> {
+  const env: Record<string, string> = { TERM: "dumb" };
+  for (const key of ENV_ALLOWLIST) {
+    if (process.env[key]) env[key] = process.env[key]!;
+  }
+  return env;
+}
 
 const BashParams = z.object({
   command: z.string().describe("The bash command to execute"),
@@ -31,6 +82,8 @@ const BashParams = z.object({
 export function createBashTool(
   cwd: string,
   processManager: ProcessManager,
+  ops: ToolOperations = localOperations,
+  planModeRef?: { current: boolean },
 ): AgentTool<typeof BashParams> {
   return {
     name: "bash",
@@ -44,6 +97,9 @@ export function createBashTool(
       "Use task_output/task_stop to interact with background processes.",
     parameters: BashParams,
     async execute({ command, timeout: timeoutMs, run_in_background }, context) {
+      if (planModeRef?.current) {
+        return "Error: bash is restricted in plan mode. Use read-only tools (read, grep, find, ls) to explore the codebase.";
+      }
       if (run_in_background) {
         const result = await processManager.start(command, cwd);
         return (
@@ -58,11 +114,11 @@ export function createBashTool(
       const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
 
       return new Promise<string>((resolve) => {
-        const child = spawn("bash", ["-c", command], {
+        const child = ops.spawn("bash", ["-c", command], {
           cwd,
           detached: true,
           stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env, TERM: "dumb" },
+          env: getSafeEnv(),
         });
 
         const chunks: Buffer[] = [];

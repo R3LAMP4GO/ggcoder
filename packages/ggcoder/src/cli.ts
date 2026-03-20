@@ -1,18 +1,40 @@
 #!/usr/bin/env node
 
+// Catch stray abort-related promise rejections that escape the normal error
+// handling chain (e.g. race conditions during Ctrl+C). Without this, Node.js
+// v25+ crashes the process on any unhandled rejection.
+process.on("unhandledRejection", (reason) => {
+  if (reason instanceof Error) {
+    const msg = reason.message.toLowerCase();
+    if (reason.name === "AbortError" || msg.includes("aborted") || msg.includes("abort")) {
+      // Silently swallow abort rejections — these are expected during cancellation
+      return;
+    }
+  }
+  // Re-throw non-abort rejections so they still crash with a useful stack trace
+  throw reason;
+});
+
 // Drain performance entries to prevent buffer overflow warning from dependencies
-import { PerformanceObserver } from "node:perf_hooks";
-new PerformanceObserver(() => {}).observe({ entryTypes: ["measure", "mark"] });
+import { PerformanceObserver, performance } from "node:perf_hooks";
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (entry.entryType === "measure") performance.clearMeasures(entry.name);
+    else if (entry.entryType === "mark") performance.clearMarks(entry.name);
+  }
+}).observe({ entryTypes: ["measure", "mark"] });
 
 import { parseArgs } from "node:util";
 import fs from "node:fs";
 import readline from "node:readline/promises";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { runPrintMode } from "./modes/print-mode.js";
-import { runJsonMode } from "./modes/json-mode.js";
 import { renderApp } from "./ui/render.js";
+import { runJsonMode } from "./modes/json-mode.js";
+import { runRpcMode } from "./modes/rpc-mode.js";
+import { runServeMode } from "./modes/serve-mode.js";
 import { renderLoginSelector } from "./ui/login.js";
+import { renderSessionSelector } from "./ui/sessions.js";
 import type { CompletedItem } from "./ui/App.js";
 import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
@@ -22,11 +44,15 @@ import { ensureAppDirs, getAppPaths } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createTools } from "./tools/index.js";
+import { shouldCompact, compact } from "./core/compaction/compactor.js";
+import { setEstimatorModel } from "./core/compaction/token-estimator.js";
+import { getContextWindow } from "./core/model-registry.js";
 import { MCPClientManager, getMCPServers } from "./core/mcp/index.js";
 import { discoverAgents } from "./core/agents.js";
 import { BUILTIN_AGENTS } from "./core/builtin-agents.js";
 import { discoverSkills } from "./core/skills.js";
 import { createPlanModeManager } from "./core/plan-mode.js";
+import path from "node:path";
 import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
@@ -36,35 +62,131 @@ import { checkAndAutoUpdate } from "./core/auto-update.js";
 const _require = createRequire(import.meta.url);
 const CLI_VERSION = (_require("../package.json") as { version: string }).version;
 
-const USAGE = `
-Usage: ggcoder [command] [options] [message...]
+// ── Logo + gradient (mirrors Banner.tsx) ────────────────────────────
+const LOGO_LINES = [
+  " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
+  " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+  " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
+];
+const GRADIENT = [
+  "#60a5fa",
+  "#6da1f9",
+  "#7a9df7",
+  "#8799f5",
+  "#9495f3",
+  "#a18ff1",
+  "#a78bfa",
+  "#a18ff1",
+  "#9495f3",
+  "#8799f5",
+  "#7a9df7",
+  "#6da1f9",
+];
 
-Commands:
-  login                     Log in to a provider via OAuth
-  logout                    Log out (clear stored credentials)
-  continue                  Resume the most recent session for this directory
+function gradientLine(text: string): string {
+  let result = "";
+  let colorIdx = 0;
+  for (const ch of text) {
+    if (ch === " ") {
+      result += ch;
+    } else {
+      result += chalk.hex(GRADIENT[colorIdx % GRADIENT.length])(ch);
+      colorIdx++;
+    }
+  }
+  return result;
+}
 
-Options:
-  -p, --provider <name>     LLM provider (anthropic, openai, glm, moonshot, ollama) [default: anthropic]
-  -m, --model <name>        Model name [default: claude-opus-4-6]
-      --base-url <url>      Custom API base URL
-      --system-prompt <text> Override system prompt
-      --thinking <level>    Thinking level (low, medium, high, max)
-      --max-turns <n>       Maximum agent loop turns [default: 40]
-  -s, --session <path>      Resume a specific session file
-      --print               Print mode: one-shot, output to stdout, then exit
-      --json                JSON mode: one-shot, output NDJSON events to stdout
-  -v, --version             Show version number
-  -h, --help                Show this help message
+function printHelp(): void {
+  // Clear screen for a clean look, consistent with the TUI startup
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
 
-Print mode:
-  echo "hello" | ggcoder --print
-  ggcoder --print "explain this code"
+  const dim = chalk.dim;
+  const primary = chalk.hex("#60a5fa");
+  const accent = chalk.hex("#a78bfa");
+  const bold = chalk.bold;
+  const gap = "   ";
 
-Authentication:
-  ggcoder login             Log in (select provider interactively)
-  ggcoder logout            Log out from all providers
-`.trim();
+  // Banner — matches the Ink Banner component layout
+  console.log();
+  console.log(
+    gradientLine(LOGO_LINES[0]) +
+      gap +
+      primary.bold("GG Coder") +
+      dim(` v${CLI_VERSION}`) +
+      dim(" · By ") +
+      bold("Ken Kai"),
+  );
+  console.log(gradientLine(LOGO_LINES[1]) + gap + dim("AI coding agent"));
+  console.log(gradientLine(LOGO_LINES[2]));
+  console.log();
+
+  // Usage
+  console.log(primary("Usage:") + "  ggcoder " + dim("[options]") + " " + dim("[prompt]"));
+  console.log();
+
+  // Commands
+  console.log(primary("Commands:"));
+  const cmds: [string, string][] = [
+    ["login", "Log in to an AI provider (Anthropic, OpenAI)"],
+    ["logout", "Log out and clear stored credentials"],
+    ["sessions", "Browse and resume previous sessions"],
+    ["continue", "Resume the most recent session"],
+    ["serve", "Start the HTTP/WebSocket API server"],
+    ["telegram", "Configure Telegram bot integration"],
+  ];
+  for (const [name, desc] of cmds) {
+    console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
+  }
+  console.log();
+
+  // Options
+  console.log(primary("Options:"));
+  const opts: [string, string][] = [
+    ["-h, --help", "Show this help message"],
+    ["-v, --version", "Show version number"],
+    ["--provider <name>", "AI provider (anthropic, openai)"],
+    ["--model <name>", "Model to use (e.g. claude-sonnet-4-6, gpt-4.1)"],
+    ["--max-turns <n>", "Maximum agent turns per prompt"],
+    ["--system-prompt <text>", "Override the system prompt"],
+    ["--json", "JSON output mode (for sub-agents)"],
+    ["--rpc", "JSON-RPC mode (for IDE integrations)"],
+  ];
+  for (const [flag, desc] of opts) {
+    console.log(`  ${accent(flag.padEnd(24))} ${dim(desc)}`);
+  }
+  console.log();
+
+  // Interactive commands
+  console.log(primary("Interactive commands") + dim(" (inside the chat):"));
+  const slashCmds: [string, string][] = [
+    ["/help", "Show available slash commands"],
+    ["/model", "Switch AI model"],
+    ["/compact", "Compact conversation context"],
+    ["/session", "Switch or create sessions"],
+    ["/new", "Start a new session"],
+    ["/settings", "Open settings"],
+    ["/quit", "Exit ggcoder"],
+  ];
+  for (const [name, desc] of slashCmds) {
+    console.log(`  ${accent(name.padEnd(20))} ${dim(desc)}`);
+  }
+  console.log();
+
+  // Keyboard shortcuts
+  console.log(primary("Keyboard shortcuts:"));
+  const shortcuts: [string, string][] = [
+    ["Ctrl+T", "Toggle task overlay"],
+    ["Ctrl+S", "Toggle skills overlay"],
+    ["Ctrl+P", "Toggle plan mode"],
+    ["Shift+Tab", "Toggle thinking"],
+    ["Shift+Enter", "New line in input"],
+  ];
+  for (const [key, desc] of shortcuts) {
+    console.log(`  ${accent(key.padEnd(20))} ${dim(desc)}`);
+  }
+  console.log();
+}
 
 function main(): void {
   // Silent auto-update check (throttled, non-blocking on failure).
@@ -74,6 +196,13 @@ function main(): void {
     if (updateMessage) {
       console.error(chalk.hex("#60a5fa")(updateMessage));
     }
+  }
+
+  // Intercept --help / -h before anything else so it works with subcommands
+  // (e.g. `ggcoder login --help` or `ggcoder --help`)
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    printHelp();
+    process.exit(0);
   }
 
   // Handle subcommands before parseArgs
@@ -99,6 +228,38 @@ function main(): void {
     return;
   }
 
+  if (subcommand === "sessions") {
+    process.argv.splice(2, 1);
+    runSessions().catch((err) => {
+      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
+      closeLogger();
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+    return;
+  }
+
+  if (subcommand === "telegram") {
+    runTelegramSetup().catch((err) => {
+      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
+      closeLogger();
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+    return;
+  }
+
+  if (subcommand === "serve") {
+    process.argv.splice(2, 1);
+    runServe().catch((err) => {
+      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
+      closeLogger();
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+    return;
+  }
+
   if (subcommand === "continue") {
     // Remove "continue" so parseArgs handles remaining flags
     process.argv.splice(2, 1);
@@ -106,32 +267,67 @@ function main(): void {
 
   const { values, positionals } = parseArgs({
     options: {
-      provider: { type: "string", short: "p" },
-      model: { type: "string", short: "m" },
-      "base-url": { type: "string" },
-      "system-prompt": { type: "string" },
-      thinking: { type: "string" },
-      "max-turns": { type: "string" },
-      session: { type: "string", short: "s" },
-      "restricted-tools": { type: "string" },
-      agents: { type: "string" },
-      print: { type: "boolean" },
-      json: { type: "boolean" },
-      version: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
+      version: { type: "boolean", short: "v" },
+      json: { type: "boolean" },
+      rpc: { type: "boolean" },
+      provider: { type: "string" },
+      model: { type: "string" },
+      "max-turns": { type: "string" },
+      "system-prompt": { type: "string" },
     },
     allowPositionals: true,
     strict: true,
   });
+
+  if (values.help) {
+    printHelp();
+    process.exit(0);
+  }
 
   if (values.version) {
     console.log(CLI_VERSION);
     process.exit(0);
   }
 
-  if (values.help) {
-    console.log(USAGE);
-    process.exit(0);
+  // JSON mode — used by sub-agents
+  if (values.json) {
+    const message = positionals[0] ?? "";
+    const jsonProvider = (values.provider ?? "anthropic") as Provider;
+    const jsonModel = values.model ?? "claude-opus-4-6";
+    const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
+    const systemPrompt = values["system-prompt"];
+    const cwd = process.cwd();
+    runJsonMode({
+      message,
+      provider: jsonProvider,
+      model: jsonModel,
+      cwd,
+      systemPrompt,
+      maxTurns,
+    }).catch((err: unknown) => {
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+    return;
+  }
+
+  // RPC mode — headless JSON-over-stdio for IDE integrations
+  if (values.rpc) {
+    const rpcProvider = (values.provider ?? "anthropic") as Provider;
+    const rpcModel = values.model ?? "claude-opus-4-6";
+    const systemPrompt = values["system-prompt"];
+    const cwd = process.cwd();
+    runRpcMode({
+      provider: rpcProvider,
+      model: rpcModel,
+      cwd,
+      systemPrompt,
+    }).catch((err: unknown) => {
+      process.stderr.write(formatUserError(err) + "\n");
+      process.exit(1);
+    });
+    return;
   }
 
   // Load saved settings for model/provider persistence
@@ -169,74 +365,8 @@ function main(): void {
     return "claude-opus-4-6";
   }
 
-  // Use saved model only if provider matches (or no provider flag was given)
-  const model: string =
-    values.model ?? (!providerFromFlag && savedModel ? savedModel : getHardcodedDefault(provider));
-
-  // CLI --thinking flag overrides saved setting; saved thinkingEnabled provides default
-  const thinkingLevel: ThinkingLevel | undefined =
-    (values.thinking as ThinkingLevel | undefined) ?? (savedThinkingEnabled ? "medium" : undefined);
-  const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
-
-  // Print mode
-  if (values.print) {
-    const message = positionals.join(" ").trim() || readStdinSync();
-    if (!message) {
-      console.error("Error: --print requires a message (positional args or stdin)");
-      process.exit(1);
-    }
-
-    runPrintMode({
-      message,
-      provider,
-      model,
-      baseUrl: values["base-url"],
-      systemPrompt: values["system-prompt"],
-      cwd: process.cwd(),
-      thinkingLevel,
-    }).catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
-
-  // JSON mode
-  if (values.json) {
-    const message = positionals.join(" ").trim() || readStdinSync();
-    if (!message) {
-      console.error("Error: --json requires a message (positional args or stdin)");
-      process.exit(1);
-    }
-
-    // Parse --restricted-tools flag (comma-separated list)
-    const restrictedTools = values["restricted-tools"]
-      ? values["restricted-tools"]
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean)
-      : undefined;
-
-    runJsonMode({
-      message,
-      provider,
-      model,
-      baseUrl: values["base-url"],
-      systemPrompt: values["system-prompt"],
-      cwd: process.cwd(),
-      thinkingLevel,
-      maxTurns,
-      restrictedTools,
-    }).catch((err) => {
-      log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
-      closeLogger();
-      process.stderr.write(formatUserError(err) + "\n");
-      process.exit(1);
-    });
-    return;
-  }
+  const model: string = savedModel ?? getHardcodedDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
 
   // Interactive mode (Ink TUI)
   const cwd = process.cwd();
@@ -245,12 +375,9 @@ function main(): void {
   runInkTUI({
     provider,
     model,
-    baseUrl: values["base-url"],
     cwd,
     thinkingLevel,
-    systemPrompt: values["system-prompt"],
     continueRecent,
-    sessionPath: values.session,
     theme: savedTheme,
   }).catch((err) => {
     log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
@@ -265,15 +392,16 @@ function main(): void {
 async function runInkTUI(opts: {
   provider: Provider;
   model: string;
-  baseUrl?: string;
   cwd: string;
   thinkingLevel?: ThinkingLevel;
-  systemPrompt?: string;
   continueRecent?: boolean;
-  sessionPath?: string;
+  resumeSessionPath?: string;
   theme?: "auto" | "dark" | "light";
 }): Promise<void> {
   const { provider, model, cwd } = opts;
+
+  // Set model for token estimation accuracy
+  setEstimatorModel(model);
 
   // Resolve auth
   const paths = await ensureAppDirs();
@@ -309,6 +437,12 @@ async function runInkTUI(opts: {
     }
   }
 
+  // Ensure project-local .gg directories exist
+  const localGGDir = path.join(cwd, ".gg");
+  await fs.promises.mkdir(path.join(localGGDir, "skills"), { recursive: true });
+  await fs.promises.mkdir(path.join(localGGDir, "commands"), { recursive: true });
+  await fs.promises.mkdir(path.join(localGGDir, "agents"), { recursive: true });
+
   // Discover agents (user-defined) and merge with built-in agents
   const userAgents = await discoverAgents({
     globalAgentsDir: paths.agentsDir,
@@ -327,17 +461,27 @@ async function runInkTUI(opts: {
     projectDir: cwd,
   });
 
-  // Create plan mode manager
-  const planModeManager = createPlanModeManager(cwd);
+  // Build system prompt & tools (with sub-agent support)
+  const systemPrompt = await buildSystemPrompt(cwd, skills);
 
-  // Build system prompt & tools (with sub-agent + plan mode support)
-  const systemPrompt = opts.systemPrompt ?? (await buildSystemPrompt(cwd));
+  // Plan mode refs — shared between tools and UI
+  const planModeManager = createPlanModeManager(cwd);
+  const planModeRef = { current: false };
+  const onEnterPlanRef: { current: (reason?: string) => void } = {
+    current: () => {},
+  };
+  const onExitPlanRef: { current: (planPath: string) => Promise<string> } = {
+    current: () => Promise.resolve("cancelled"),
+  };
+
   const { tools, processManager } = createTools(cwd, {
     agents,
+    skills,
     provider,
     model,
-    planModeManager,
-    skills,
+    planModeRef,
+    onEnterPlan: (reason) => onEnterPlanRef.current(reason),
+    onExitPlan: (planPath) => onExitPlanRef.current(planPath),
   });
 
   // Connect MCP servers
@@ -369,31 +513,53 @@ async function runInkTUI(opts: {
   let sessionPath: string | undefined;
   let initialHistory: CompletedItem[] | undefined;
 
-  if (opts.continueRecent || opts.sessionPath) {
-    const existingPath = opts.sessionPath ?? (await sessionManager.getMostRecent(cwd));
+  // Determine which session to resume (explicit path or most recent)
+  const resumePath =
+    opts.resumeSessionPath ??
+    (opts.continueRecent ? await sessionManager.getMostRecent(cwd) : null);
 
-    if (existingPath) {
-      try {
-        const loaded = await sessionManager.load(existingPath);
-        const loadedMessages = sessionManager.getMessages(loaded.entries);
+  if (resumePath) {
+    try {
+      const loaded = await sessionManager.load(resumePath);
+      const loadedMessages = sessionManager.getMessages(loaded.entries);
 
-        if (loadedMessages.length > 0) {
-          messages.push(...loadedMessages);
-          sessionPath = existingPath;
-          log("INFO", "session", `Restored session`, {
-            path: existingPath,
-            messageCount: String(loadedMessages.length),
+      if (loadedMessages.length > 0) {
+        messages.push(...loadedMessages);
+        sessionPath = resumePath;
+        log("INFO", "session", `Restored session`, {
+          path: resumePath,
+          messageCount: String(loadedMessages.length),
+        });
+
+        // Auto-compact on load if the restored session exceeds the context window.
+        // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
+        const contextWindow = getContextWindow(model);
+        if (shouldCompact(messages, contextWindow, 0.8)) {
+          log("INFO", "session", `Restored session exceeds context — auto-compacting`);
+          const compacted = await compact(messages, {
+            provider,
+            model,
+            apiKey: creds.accessToken,
+            contextWindow,
           });
-          initialHistory = messagesToHistoryItems(loadedMessages);
-          initialHistory.push({
-            kind: "info",
-            text: `↻ Restored session (${loadedMessages.length} messages)`,
-            id: `restore-info`,
+          // Replace messages array contents with compacted messages
+          messages.length = 0;
+          messages.push(...compacted.messages);
+          log("INFO", "session", `Auto-compaction complete`, {
+            before: String(compacted.result.originalCount),
+            after: String(compacted.result.newCount),
           });
         }
-      } catch {
-        // Session file corrupt or missing — start fresh
+
+        initialHistory = messagesToHistoryItems(loadedMessages);
+        initialHistory.push({
+          kind: "info",
+          text: `↻ Restored session (${loadedMessages.length} messages)`,
+          id: `restore-info`,
+        });
       }
+    } catch {
+      // Session file corrupt or missing — start fresh
     }
   }
 
@@ -414,7 +580,6 @@ async function runInkTUI(opts: {
     maxTokens: 16384,
     thinking: opts.thinkingLevel,
     apiKey: creds.accessToken,
-    baseUrl: opts.baseUrl,
     accountId: creds.accountId,
     cwd,
     theme: opts.theme,
@@ -429,6 +594,10 @@ async function runInkTUI(opts: {
     settingsFile: paths.settingsFile,
     mcpManager,
     authStorage,
+    planModeRef,
+    onEnterPlanRef,
+    onExitPlanRef,
+    skills,
   });
 
   closeLogger();
@@ -437,6 +606,7 @@ async function runInkTUI(opts: {
 // ── Login ──────────────────────────────────────────────────
 
 async function runLogin(): Promise<void> {
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
   const paths = await ensureAppDirs();
   initLogger(paths.logFile, { version: CLI_VERSION });
   log("INFO", "auth", "Login flow started");
@@ -445,7 +615,7 @@ async function runLogin(): Promise<void> {
   await authStorage.load();
 
   // Phase 1: Ink-based provider selector
-  const provider = await renderLoginSelector();
+  const provider = await renderLoginSelector(CLI_VERSION);
   if (!provider) {
     console.log(chalk.hex("#6b7280")("Login cancelled."));
     return;
@@ -545,16 +715,324 @@ async function runLogout(): Promise<void> {
   console.log(chalk.green("Logged out successfully."));
 }
 
-// ── Helpers ────────────────────────────────────────────────
+// ── Sessions ──────────────────────────────────────────────
 
-function readStdinSync(): string {
-  if (process.stdin.isTTY) return "";
+async function runSessions(): Promise<void> {
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  const paths = await ensureAppDirs();
+  initLogger(paths.logFile, { version: CLI_VERSION });
+  log("INFO", "session", "Sessions selector started");
+
+  const cwd = process.cwd();
+  const selectedPath = await renderSessionSelector(paths.sessionsDir, cwd, CLI_VERSION);
+
+  if (!selectedPath) {
+    console.log(chalk.hex("#6b7280")("No session selected."));
+    closeLogger();
+    process.exit(0);
+  }
+
+  // Load saved settings for provider/model/theme
+  let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
+  let savedModel: string | undefined;
+  let savedThinkingEnabled = false;
+  let savedTheme: "auto" | "dark" | "light" = "auto";
   try {
-    return fs.readFileSync(0, "utf-8").trim();
+    const raw = JSON.parse(fs.readFileSync(paths.settingsFile, "utf-8"));
+    if (raw.defaultProvider) savedProvider = raw.defaultProvider;
+    if (raw.defaultModel) savedModel = raw.defaultModel;
+    if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
+    if (raw.theme === "dark" || raw.theme === "light" || raw.theme === "auto")
+      savedTheme = raw.theme;
   } catch {
-    return "";
+    // No settings file — use defaults
+  }
+
+  const provider: "anthropic" | "openai" | "glm" | "moonshot" = savedProvider ?? "anthropic";
+
+  function getDefault(p: string): string {
+    if (p === "openai") return "gpt-5.3-codex";
+    if (p === "glm") return "glm-5";
+    if (p === "moonshot") return "kimi-k2.5";
+    return "claude-opus-4-6";
+  }
+
+  const model = savedModel ?? getDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
+
+  closeLogger();
+
+  await runInkTUI({
+    provider,
+    model,
+    cwd,
+    thinkingLevel,
+    resumeSessionPath: selectedPath,
+    theme: savedTheme,
+  });
+}
+
+// ── Telegram Setup ───────────────────────────────────────
+
+interface TelegramConfig {
+  botToken: string;
+  userId: number;
+}
+
+async function loadTelegramConfig(): Promise<TelegramConfig | null> {
+  try {
+    const raw = await fs.promises.readFile(getAppPaths().telegramFile, "utf-8");
+    const data = JSON.parse(raw) as TelegramConfig;
+    if (data.botToken && data.userId) return data;
+    return null;
+  } catch {
+    return null;
   }
 }
+
+async function saveTelegramConfig(config: TelegramConfig): Promise<void> {
+  const paths = await ensureAppDirs();
+  await fs.promises.writeFile(paths.telegramFile, JSON.stringify(config, null, 2), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+}
+
+async function runTelegramSetup(): Promise<void> {
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+  const paths = await ensureAppDirs();
+  initLogger(paths.logFile, { version: CLI_VERSION });
+  log("INFO", "telegram", "Telegram setup started");
+
+  const existing = await loadTelegramConfig();
+
+  // Banner (matches Banner.tsx)
+  const LOGO = [
+    " \u2584\u2580\u2580\u2580 \u2584\u2580\u2580\u2580",
+    " \u2588 \u2580\u2588 \u2588 \u2580\u2588",
+    " \u2580\u2584\u2584\u2580 \u2580\u2584\u2584\u2580",
+  ];
+  const GRADIENT = [
+    "#60a5fa",
+    "#6da1f9",
+    "#7a9df7",
+    "#8799f5",
+    "#9495f3",
+    "#a18ff1",
+    "#a78bfa",
+    "#a18ff1",
+    "#9495f3",
+    "#8799f5",
+    "#7a9df7",
+    "#6da1f9",
+  ];
+  function gradientText(text: string): string {
+    let colorIdx = 0;
+    return text
+      .split("")
+      .map((ch) => {
+        if (ch === " ") return ch;
+        const color = GRADIENT[colorIdx++ % GRADIENT.length]!;
+        return chalk.hex(color)(ch);
+      })
+      .join("");
+  }
+  const GAP = "   ";
+  console.log();
+  console.log(
+    `  ${gradientText(LOGO[0]!)}${GAP}` +
+      chalk.hex("#60a5fa").bold("GG Coder") +
+      chalk.hex("#6b7280")(` v${CLI_VERSION}`) +
+      chalk.hex("#6b7280")(" · By ") +
+      chalk.white.bold("Ken Kai"),
+  );
+  console.log(`  ${gradientText(LOGO[1]!)}${GAP}` + chalk.hex("#a78bfa")("Telegram Setup"));
+  console.log(`  ${gradientText(LOGO[2]!)}${GAP}` + chalk.hex("#6b7280")("Remote Control"));
+  console.log();
+
+  if (existing) {
+    console.log(
+      chalk.hex("#6b7280")("  Current config:\n") +
+        chalk.hex("#6b7280")(
+          `    Bot token: ${existing.botToken.slice(0, 10)}...${existing.botToken.slice(-4)}\n`,
+        ) +
+        chalk.hex("#6b7280")(`    User ID:   ${existing.userId}\n`),
+    );
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  try {
+    // Step 1: Bot token
+    console.log(
+      chalk.hex("#a78bfa")("  Step 1: Bot Token\n") +
+        chalk.hex("#6b7280")("    1. Open BotFather: ") +
+        chalk.hex("#60a5fa").underline("https://t.me/BotFather") +
+        "\n" +
+        chalk.hex("#6b7280")("    2. Send /newbot and follow the prompts\n") +
+        chalk.hex("#6b7280")("    3. Copy the bot token\n"),
+    );
+
+    const tokenPrompt = existing
+      ? chalk.hex("#60a5fa")("  Paste bot token (enter to keep current): ")
+      : chalk.hex("#60a5fa")("  Paste bot token: ");
+    const tokenInput = await rl.question(tokenPrompt);
+    const botToken = tokenInput.trim() || existing?.botToken;
+
+    if (!botToken) {
+      console.log(chalk.hex("#ef4444")("\n  No bot token provided. Setup cancelled."));
+      return;
+    }
+
+    // Validate token format (roughly: digits:alphanumeric)
+    if (!/^\d+:[A-Za-z0-9_-]+$/.test(botToken)) {
+      console.log(chalk.hex("#ef4444")("\n  Invalid token format. Expected: 123456789:ABCdef..."));
+      return;
+    }
+
+    // Step 2: User ID
+    console.log(
+      chalk.hex("#a78bfa")("\n  Step 2: User ID\n") +
+        chalk.hex("#6b7280")("    1. Open userinfobot: ") +
+        chalk.hex("#60a5fa").underline("https://t.me/userinfobot") +
+        "\n" +
+        chalk.hex("#6b7280")("    2. Send any message — it replies with your numeric ID\n") +
+        chalk.hex("#6b7280")("    Only this user ID can control the bot.\n"),
+    );
+
+    const userPrompt = existing
+      ? chalk.hex("#60a5fa")(`  Your Telegram user ID (enter to keep ${existing.userId}): `)
+      : chalk.hex("#60a5fa")("  Your Telegram user ID: ");
+    const userInput = await rl.question(userPrompt);
+    const userId = userInput.trim() ? parseInt(userInput.trim(), 10) : existing?.userId;
+
+    if (!userId || isNaN(userId)) {
+      console.log(chalk.hex("#ef4444")("\n  Invalid user ID. Must be a number."));
+      return;
+    }
+
+    // Step 3: Verify bot token by calling getMe
+    console.log(chalk.hex("#6b7280")("\n  Verifying bot token..."));
+
+    const verifyRes = await fetch(`https://api.telegram.org/bot${botToken}/getMe`, {
+      method: "POST",
+    });
+    const verifyData = (await verifyRes.json()) as {
+      ok: boolean;
+      result?: { username: string; first_name: string };
+    };
+
+    if (!verifyData.ok || !verifyData.result) {
+      console.log(
+        chalk.hex("#ef4444")("\n  Invalid bot token — Telegram rejected it. Check and try again."),
+      );
+      return;
+    }
+
+    const botName = verifyData.result.first_name;
+    const botUsername = verifyData.result.username;
+
+    // Save config
+    await saveTelegramConfig({ botToken, userId });
+
+    log("INFO", "telegram", `Telegram setup complete: @${botUsername} (user ${userId})`);
+
+    console.log(
+      chalk.hex("#4ade80")(`\n  ✓ Connected to @${botUsername} (${botName})\n`) +
+        chalk.hex("#4ade80")(`  ✓ Authorized user ID: ${userId}\n`) +
+        chalk.hex("#4ade80")(`  ✓ Config saved to ${paths.telegramFile}\n\n`) +
+        chalk.hex("#a78bfa")("  For group chats:\n") +
+        chalk.hex("#6b7280")(
+          "    1. Message @BotFather → /setprivacy → select your bot → Disable\n",
+        ) +
+        chalk.hex("#6b7280")("    2. Add the bot to your group\n") +
+        chalk.hex("#6b7280")("    3. Send /link in the group to connect it to a project\n\n") +
+        chalk.hex("#60a5fa")("  To start:\n") +
+        chalk.hex("#6b7280")("    cd your-project && ggcoder serve\n"),
+    );
+  } finally {
+    rl.close();
+    closeLogger();
+  }
+}
+
+// ── Serve (Telegram) ─────────────────────────────────────
+
+async function runServe(): Promise<void> {
+  const { values: serveValues } = parseArgs({
+    options: {
+      "bot-token": { type: "string" },
+      "user-id": { type: "string" },
+      provider: { type: "string" },
+      model: { type: "string" },
+    },
+    strict: true,
+  });
+
+  // Priority: CLI flags > env vars > saved config
+  const saved = await loadTelegramConfig();
+  const botToken = serveValues["bot-token"] ?? process.env.GG_TELEGRAM_BOT_TOKEN ?? saved?.botToken;
+  const userIdStr = serveValues["user-id"] ?? process.env.GG_TELEGRAM_USER_ID;
+  const userId = userIdStr ? parseInt(userIdStr, 10) : saved?.userId;
+
+  if (!botToken || !userId || isNaN(userId)) {
+    console.error(
+      chalk.hex("#ef4444")("Telegram not configured.\n\n") +
+        "Run " +
+        chalk.hex("#60a5fa").bold("ggcoder telegram") +
+        " to set up your bot token and user ID.\n\n" +
+        chalk.hex("#6b7280")("Or provide manually:\n") +
+        chalk.hex("#6b7280")("  ggcoder serve --bot-token TOKEN --user-id ID"),
+    );
+    process.exit(1);
+  }
+
+  // Load saved settings
+  let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
+  let savedModel: string | undefined;
+  let savedThinkingEnabled = false;
+  try {
+    const raw = JSON.parse(fs.readFileSync(getAppPaths().settingsFile, "utf-8"));
+    if (raw.defaultProvider) savedProvider = raw.defaultProvider;
+    if (raw.defaultModel) savedModel = raw.defaultModel;
+    if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
+  } catch {
+    // No settings file
+  }
+
+  const provider: Provider =
+    (serveValues.provider as Provider | undefined) ?? savedProvider ?? "anthropic";
+
+  function getDefault(p: string): string {
+    if (p === "openai") return "gpt-5.3-codex";
+    if (p === "glm") return "glm-5";
+    if (p === "moonshot") return "kimi-k2.5";
+    return "claude-opus-4-6";
+  }
+
+  const model = serveValues.model ?? savedModel ?? getDefault(provider);
+  const thinkingLevel: ThinkingLevel | undefined = savedThinkingEnabled ? "medium" : undefined;
+
+  const paths = await ensureAppDirs();
+  initLogger(paths.logFile, {
+    version: CLI_VERSION,
+    provider,
+    model,
+  });
+
+  setEstimatorModel(model);
+
+  await runServeMode({
+    provider,
+    model,
+    cwd: process.cwd(),
+    version: CLI_VERSION,
+    thinkingLevel,
+    telegram: { botToken, userId },
+  });
+}
+
+// ── Helpers ────────────────────────────────────────────────
 
 function displayName(provider: Provider): string {
   if (provider === "anthropic") return "Anthropic";

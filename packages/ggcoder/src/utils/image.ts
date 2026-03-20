@@ -334,6 +334,66 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
+/**
+ * Downscale an image buffer so it fits within MAX_IMAGE_BYTES.
+ * Preserves format (PNG→PNG, JPEG→JPEG, etc.) and aspect ratio.
+ * Progressively reduces dimensions by 25% until under the limit.
+ */
+async function shrinkToFit(
+  buffer: Buffer,
+  mediaType: string,
+): Promise<{ buffer: Buffer; mediaType: string }> {
+  if (buffer.length <= MAX_IMAGE_BYTES) return { buffer, mediaType };
+
+  const sharpMod = await loadSharp();
+  if (!sharpMod) return { buffer, mediaType };
+
+  let img = sharpMod(buffer);
+  const meta = await img.metadata();
+  let width = meta.width ?? 4096;
+  let height = meta.height ?? 4096;
+
+  // Determine output format from mediaType
+  const formatMap: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/bmp": "png",
+  };
+  let outFormat = formatMap[mediaType] ?? "png";
+  let outMediaType = mediaType === "image/bmp" ? "image/png" : mediaType;
+
+  // Try progressively smaller sizes (75% each step)
+  for (let attempt = 0; attempt < 10; attempt++) {
+    width = Math.round(width * 0.75);
+    height = Math.round(height * 0.75);
+    if (width < 1 || height < 1) break;
+
+    img = sharpMod(buffer).resize(width, height, { fit: "inside", withoutEnlargement: true });
+    const result = await (img.toFormat(outFormat as any) as any).toBuffer();
+
+    if (result.length <= MAX_IMAGE_BYTES) {
+      return { buffer: result, mediaType: outMediaType };
+    }
+
+    if (attempt === 2 && outFormat === "png") {
+      outFormat = "jpeg";
+      outMediaType = "image/jpeg";
+    }
+  }
+
+  // Last resort: aggressive JPEG compression at small size
+  const result = await sharpMod(buffer)
+    .resize(Math.round(width * 0.5), Math.round(height * 0.5), {
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: 60 })
+    .toBuffer();
+  return { buffer: result, mediaType: "image/jpeg" };
+}
+
 /** Read a file and return an attachment (base64 for images, raw text for text files). */
 export async function readImageFile(filePath: string): Promise<ImageAttachment> {
   const ext = path.extname(filePath).toLowerCase();

@@ -157,17 +157,19 @@ export function applySkillSubstitutions(content: string, args: string, sessionId
 }
 
 /**
- * Format skills into a system prompt section.
+ * Format skills as a summary list for the system prompt.
+ * Only includes names and descriptions — full content is loaded on-demand via the skill tool.
  */
 export function formatSkillsForPrompt(skills: Skill[]): string {
   if (skills.length === 0) return "";
 
-  const parts = ["## Skills\n"];
-  for (const skill of skills) {
-    parts.push(`### ${skill.name}${skill.description ? ` — ${skill.description}` : ""}`);
-    parts.push(skill.content);
-    parts.push("");
-  }
+  const list = skills
+    .map((s) => `- **${s.name}**${s.description ? `: ${s.description}` : ""}`)
+    .join("\n");
 
-  return parts.join("\n");
+  return (
+    `## Skills\n\n` +
+    `The following skills are available. Use the **skill** tool to invoke a skill when needed:\n\n` +
+    list
+  );
 }

@@ -10,11 +10,12 @@ import type { Message, Provider, ThinkingLevel, TextContent, ImageContent } from
 import { extractImagePaths, type ImageAttachment } from "../utils/image.js";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { AgentDefinition } from "../core/agents.js";
-import { useAgentLoop, type ActivityPhase } from "./hooks/useAgentLoop.js";
+import { useAgentLoop, type ActivityPhase, type UserContent } from "./hooks/useAgentLoop.js";
 import { UserMessage } from "./components/UserMessage.js";
 import type { PasteInfo } from "./components/InputArea.js";
 import { AssistantMessage } from "./components/AssistantMessage.js";
 import { ToolExecution } from "./components/ToolExecution.js";
+import { ToolGroupExecution } from "./components/ToolGroupExecution.js";
 import { ServerToolExecution } from "./components/ServerToolExecution.js";
 import { SubAgentPanel, type SubAgentInfo } from "./components/SubAgentPanel.js";
 import { CompactionSpinner, CompactionDone } from "./components/CompactionNotice.js";
@@ -24,10 +25,12 @@ import { ActivityIndicator } from "./components/ActivityIndicator.js";
 import { InputArea } from "./components/InputArea.js";
 import { Footer } from "./components/Footer.js";
 import { Banner } from "./components/Banner.js";
+import { PlanOverlay } from "./components/PlanOverlay.js";
 import { ModelSelector } from "./components/ModelSelector.js";
 import { TaskOverlay } from "./components/TaskOverlay.js";
 import { AgentsOverlay } from "./components/AgentsOverlay.js";
 import { McpOverlay } from "./components/McpOverlay.js";
+import { SkillsOverlay } from "./components/SkillsOverlay.js";
 import { BUILTIN_AGENTS } from "../core/builtin-agents.js";
 import { discoverAgents } from "../core/agents.js";
 import { getAppPaths } from "../config.js";
@@ -35,6 +38,7 @@ import { BackgroundTasksBar } from "./components/BackgroundTasksBar.js";
 import type { SlashCommandInfo } from "./components/SlashCommandMenu.js";
 import type { ProcessManager, BackgroundProcess } from "../core/process-manager.js";
 import { useTheme } from "./theme/theme.js";
+import { useAnimationTick, deriveFrame } from "./components/AnimationContext.js";
 import { useTerminalTitle } from "./hooks/useTerminalTitle.js";
 import { getGitBranch } from "../utils/git.js";
 import { getModel, getContextWindow } from "../core/model-registry.js";
@@ -46,16 +50,17 @@ import { estimateConversationTokens } from "../core/compaction/token-estimator.j
 import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
 import { loadCustomCommands, type CustomCommand } from "../core/custom-commands.js";
 import { extractEmbedded, parseBashPrefix, extractFileMentions } from "../core/slash-commands.js";
+import { buildSystemPrompt } from "../system-prompt.js";
+import type { Skill } from "../core/skills.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import { getMCPServers } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
-import { pruneHistory, flushOnTurnText, flushOnTurnEnd } from "./live-item-flush.js";
+import { trimFlushedItems, flushOnTurnText, flushOnTurnEnd } from "./live-item-flush.js";
 import {
   createPlanModeManager,
   type PlanModeState,
   type PlanModeManager,
 } from "../core/plan-mode.js";
-import { PlanOverlay } from "./components/PlanOverlay.js";
 import { QuestionOverlay } from "./components/QuestionOverlay.js";
 import { setQuestionHandler } from "../tools/ask-user-question.js";
 import type { Question, QuestionResult, ElicitationRequest } from "../tools/ask-user-question.js";
@@ -69,6 +74,14 @@ function getProviderErrorHint(message: string): string | null {
   const lower = message.toLowerCase();
   if (lower.includes("overloaded") || lower.includes("engine_overloaded")) {
     return "This is a provider-side issue — their servers are under heavy load. Try again in a moment.";
+  }
+  if (
+    lower.includes("insufficient balance") ||
+    lower.includes("no resource package") ||
+    lower.includes("quota exceeded") ||
+    lower.includes("recharge")
+  ) {
+    return "The provider reports a billing or quota issue. Check your account balance or resource package.";
   }
   if (
     lower.includes("rate limit") ||
@@ -88,6 +101,13 @@ function getProviderErrorHint(message: string): string | null {
   }
   if (lower.includes("500") && lower.includes("internal server error")) {
     return "The provider experienced an internal error. This is not a ggcoder issue.";
+  }
+  if (
+    lower.includes("does not recognize the requested model") ||
+    (lower.includes("model") &&
+      (lower.includes("not exist") || lower.includes("not found") || lower.includes("no access")))
+  ) {
+    return "Use /model to switch to a different model, or check that your account has access to the requested model.";
   }
   return null;
 }
@@ -146,6 +166,13 @@ interface InfoItem {
   id: string;
 }
 
+interface QueuedItem {
+  kind: "queued";
+  text: string;
+  imageCount?: number;
+  id: string;
+}
+
 interface CompactingItem {
   kind: "compacting";
   id: string;
@@ -199,6 +226,29 @@ interface ServerToolDoneItem {
   id: string;
 }
 
+interface TombstoneItem {
+  kind: "tombstone";
+  id: string;
+}
+
+/** Tools that get aggregated into a single compact group when concurrent. */
+const AGGREGATABLE_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+interface ToolGroupTool {
+  toolCallId: string;
+  name: string;
+  args: Record<string, unknown>;
+  status: "running" | "done";
+  result?: string;
+  isError?: boolean;
+}
+
+export interface ToolGroupItem {
+  kind: "tool_group";
+  tools: ToolGroupTool[];
+  id: string;
+}
+
 export type CompletedItem =
   | UserItem
   | TaskItem
@@ -209,14 +259,37 @@ export type CompletedItem =
   | ServerToolDoneItem
   | ErrorItem
   | InfoItem
+  | QueuedItem
   | CompactingItem
   | CompactedItem
   | DurationItem
   | BannerItem
-  | SubAgentGroupItem;
+  | SubAgentGroupItem
+  | ToolGroupItem
+  | TombstoneItem;
 
-// pruneHistory, flushOnTurnText, flushOnTurnEnd, MAX_HISTORY_ITEMS
-// are imported from ./live-item-flush.ts
+/**
+ * Cap memory by replacing old items with tiny tombstones. Ink's <Static>
+ * tracks rendered items by array length — the array must never shrink, but
+ * we can swap out heavy objects for lightweight `{ kind: "tombstone", id }`
+ * entries so GC can reclaim the original data.
+ */
+const MAX_LIVE_HISTORY = 200;
+function compactHistory(items: CompletedItem[]): CompletedItem[] {
+  if (items.length <= MAX_LIVE_HISTORY) return items;
+  const cutoff = items.length - MAX_LIVE_HISTORY;
+  const compacted = new Array<CompletedItem>(items.length);
+  for (let i = 0; i < cutoff; i++) {
+    const it = items[i];
+    compacted[i] = it.kind === "tombstone" ? it : { kind: "tombstone", id: it.id };
+  }
+  for (let i = cutoff; i < items.length; i++) {
+    compacted[i] = items[i];
+  }
+  return compacted;
+}
+
+// flushOnTurnText, flushOnTurnEnd are imported from ./live-item-flush.ts
 
 // ── Duration summary ─────────────────────────────────────
 
@@ -369,6 +442,10 @@ export interface AppProps {
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
+  planModeRef?: { current: boolean };
+  onEnterPlanRef?: { current: (reason?: string) => void };
+  onExitPlanRef?: { current: (planPath: string) => Promise<string> };
+  skills?: Skill[];
 }
 
 // ── App Component ──────────────────────────────────────────
@@ -377,7 +454,7 @@ export function App(props: AppProps) {
   const theme = useTheme();
   const { stdout } = useStdout();
   const app = useApp();
-  const { resizeKey } = useTerminalSize();
+  const { columns, resizeKey } = useTerminalSize();
 
   // Terminal title — updated later after agentLoop is created
   // (hoisted here so the hook is always called in the same order)
@@ -397,12 +474,12 @@ export function App(props: AppProps) {
   useEffect(() => {
     if (isRestoredSession && !restoredRef.current) {
       restoredRef.current = true;
-      setHistory((prev) => pruneHistory([...prev, ...props.initialHistory!]));
+      setHistory((prev) => compactHistory([...prev, ...trimFlushedItems(props.initialHistory!)]));
     }
   }, [isRestoredSession, props.initialHistory]);
   // Items from the current/last turn — rendered in the live area so they stay visible
   const [liveItems, setLiveItems] = useState<CompletedItem[]>([]);
-  const [overlay, setOverlay] = useState<"model" | "tasks" | "agents" | "mcp" | null>(null);
+  const [overlay, setOverlay] = useState<"model" | "tasks" | "agents" | "mcp" | "skills" | "plan" | null>(null);
   const [agentsList, setAgentsList] = useState<AgentDefinition[]>(props.agents ?? []);
   const [taskCount, setTaskCount] = useState(() => getTaskCount(props.cwd));
   const [runAllTasks, setRunAllTasks] = useState(false);
@@ -416,6 +493,8 @@ export function App(props: AppProps) {
     toolsUsed: string[];
     verb: string;
   } | null>(null);
+  // Suppress "done" status when a plan overlay is about to open
+  const planOverlayPendingRef = useRef(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [currentModel, setCurrentModel] = useState(props.model);
   const [currentProvider, setCurrentProvider] = useState(props.provider);
@@ -463,6 +542,9 @@ export function App(props: AppProps) {
   }, []);
 
   const messagesRef = useRef<Message[]>(props.messages);
+  const [planMode, setPlanMode] = useState(false);
+  const [planAutoExpand, setPlanAutoExpand] = useState(false);
+  const approvedPlanPathRef = useRef<string | undefined>(undefined);
   const nextIdRef = useRef(0);
   const sessionManagerRef = useRef(
     props.sessionsDir ? new SessionManager(props.sessionsDir) : null,
@@ -499,6 +581,71 @@ export function App(props: AppProps) {
   useEffect(() => {
     reloadCustomCommands();
   }, [reloadCustomCommands]);
+
+  // ── Plan mode wiring ─────────────────────────────────────
+  // Sync planModeRef with React state
+  useEffect(() => {
+    if (props.planModeRef) {
+      props.planModeRef.current = planMode;
+    }
+  }, [planMode, props.planModeRef]);
+
+  // Rebuild system prompt when plan mode changes
+  useEffect(() => {
+    void (async () => {
+      const newPrompt = await buildSystemPrompt(
+        props.cwd,
+        props.skills,
+        planMode,
+        approvedPlanPathRef.current,
+      );
+      if (messagesRef.current[0]?.role === "system") {
+        messagesRef.current[0] = {
+          role: "system" as const,
+          content: newPrompt,
+        };
+      }
+    })();
+  }, [planMode, props.cwd, props.skills]);
+
+  // Wire onEnterPlan callback ref
+  useEffect(() => {
+    if (props.onEnterPlanRef) {
+      props.onEnterPlanRef.current = (reason?: string) => {
+        setPlanMode(true);
+        const msg = reason ? `Plan mode activated: ${reason}` : "Plan mode activated";
+        setLiveItems((prev) => [...prev, { kind: "info", text: msg, id: getId() }]);
+      };
+    }
+  }, [props.onEnterPlanRef]);
+
+  // Wire onExitPlan callback ref
+  useEffect(() => {
+    if (props.onExitPlanRef) {
+      props.onExitPlanRef.current = async (planPath: string) => {
+        // Deactivate plan mode, store approved plan path, open pane
+        setPlanMode(false);
+        approvedPlanPathRef.current = planPath;
+        // Use setTimeout to open pane after the current tool execution completes,
+        // so the turn can finish and the UI transitions cleanly
+        // Flag that the plan overlay is about to open — suppresses the
+        // premature "done" status that fires when the agent loop finishes
+        planOverlayPendingRef.current = true;
+        setTimeout(() => {
+          stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+          setPlanAutoExpand(true);
+          setOverlay("plan");
+          planOverlayPendingRef.current = false;
+        }, 300);
+        return (
+          "Plan submitted. Exiting plan mode.\n" +
+          "The plan pane is opening for user review.\n" +
+          "Plan saved at: " +
+          planPath
+        );
+      };
+    }
+  }, [props.onExitPlanRef, stdout]);
 
   const persistNewMessages = useCallback(async () => {
     const sm = sessionManagerRef.current;
@@ -561,6 +708,7 @@ export function App(props: AppProps) {
           apiKey: compactApiKey,
           contextWindow,
           signal: undefined,
+          approvedPlanPath: approvedPlanPathRef.current,
         });
 
         // Replace spinner with completed notice
@@ -723,7 +871,7 @@ export function App(props: AppProps) {
         setLiveItems((prev) => {
           const flushed = flushOnTurnText(prev);
           if (flushed.length > 0) {
-            setHistory((h) => pruneHistory([...h, ...flushed]));
+            setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
           }
           return [{ kind: "assistant", text, thinking, thinkingMs, id: getId() }];
         });
@@ -753,6 +901,33 @@ export function App(props: AppProps) {
                 return next;
               }
               return [...prev, { kind: "subagent_group", agents: [newAgent], id: getId() }];
+            });
+          } else if (AGGREGATABLE_TOOLS.has(name)) {
+            // Group concurrent read-only tools into a single compact item
+            setLiveItems((prev) => {
+              // Find an active tool group (has at least one running tool)
+              const groupIdx = prev.findIndex(
+                (item) =>
+                  item.kind === "tool_group" &&
+                  (item as ToolGroupItem).tools.some((t) => t.status === "running"),
+              );
+              if (groupIdx !== -1) {
+                const group = prev[groupIdx] as ToolGroupItem;
+                const next = [...prev];
+                next[groupIdx] = {
+                  ...group,
+                  tools: [...group.tools, { toolCallId, name, args, status: "running" }],
+                };
+                return next;
+              }
+              return [
+                ...prev,
+                {
+                  kind: "tool_group",
+                  tools: [{ toolCallId, name, args, status: "running" }],
+                  id: getId(),
+                },
+              ];
             });
           } else {
             setLiveItems((prev) => [
@@ -825,6 +1000,26 @@ export function App(props: AppProps) {
             });
           } else {
             setLiveItems((prev) => {
+              // Check if this tool is in a tool_group
+              const groupIdx = prev.findIndex(
+                (item) =>
+                  item.kind === "tool_group" &&
+                  (item as ToolGroupItem).tools.some((t) => t.toolCallId === toolCallId),
+              );
+              if (groupIdx !== -1) {
+                const group = prev[groupIdx] as ToolGroupItem;
+                const next = [...prev];
+                next[groupIdx] = {
+                  ...group,
+                  tools: group.tools.map((t) =>
+                    t.toolCallId === toolCallId
+                      ? { ...t, status: "done" as const, result, isError }
+                      : t,
+                  ),
+                };
+                return next;
+              }
+
               // Find the matching tool_start and replace it with tool_done
               const startIdx = prev.findIndex(
                 (item) => item.kind === "tool_start" && item.toolCallId === toolCallId,
@@ -926,7 +1121,7 @@ export function App(props: AppProps) {
           setLiveItems((prev) => {
             const { flushed, remaining } = flushOnTurnEnd(prev, stopReason);
             if (flushed.length > 0) {
-              setHistory((h) => pruneHistory([...h, ...flushed]));
+              setHistory((h) => compactHistory([...h, ...trimFlushedItems(flushed)]));
             }
             return remaining;
           });
@@ -938,6 +1133,9 @@ export function App(props: AppProps) {
           duration: `${durationMs}ms`,
           toolsUsed: toolsUsed.join(",") || "none",
         });
+        // Don't show "done" status when plan overlay is about to open —
+        // the agent loop finished but we're waiting for user plan review
+        if (planOverlayPendingRef.current) return;
         setDoneStatus({ durationMs, toolsUsed, verb: pickDurationVerb(toolsUsed) });
         playNotificationSound();
 
@@ -973,12 +1171,79 @@ export function App(props: AppProps) {
       onAborted: useCallback(() => {
         log("WARN", "agent", "Agent run aborted by user");
         setRunAllTasks(false);
+        setDoneStatus(null);
         setLiveItems((prev) => {
-          const next = prev.map((item) =>
-            item.kind === "subagent_group" ? { ...item, aborted: true } : item,
-          );
+          const next = prev.map((item): CompletedItem => {
+            if (item.kind === "subagent_group") return { ...item, aborted: true };
+            // Convert running tools to stopped state so spinners stop
+            if (item.kind === "tool_start") {
+              return {
+                kind: "tool_done",
+                name: item.name,
+                args: item.args,
+                result: "Stopped.",
+                isError: true,
+                durationMs: 0,
+                id: item.id,
+              };
+            }
+            if (item.kind === "server_tool_start") {
+              return {
+                kind: "server_tool_done",
+                name: item.name,
+                input: item.input,
+                resultType: "aborted",
+                data: null,
+                durationMs: 0,
+                id: item.id,
+              };
+            }
+            if (item.kind === "tool_group") {
+              const tools = (item as ToolGroupItem).tools.map((t) =>
+                t.status === "running"
+                  ? { ...t, status: "done" as const, result: "Stopped.", isError: true }
+                  : t,
+              );
+              return { ...item, tools } as ToolGroupItem;
+            }
+            // Remove compaction spinner (compaction can't complete after abort)
+            if (item.kind === "compacting") {
+              return { kind: "tombstone", id: item.id };
+            }
+            return item;
+          });
           return [...next, { kind: "info", text: "Request was stopped.", id: getId() }];
         });
+      }, []),
+      onQueuedStart: useCallback((content: UserContent) => {
+        // When a queued message starts processing, show it as a UserItem
+        // and flush prior items to history
+        const displayText =
+          typeof content === "string"
+            ? content
+            : content
+                .filter((c): c is TextContent => c.type === "text")
+                .map((c) => c.text)
+                .join("\n");
+        const imageCount =
+          typeof content === "string"
+            ? undefined
+            : content.filter((c) => c.type === "image").length || undefined;
+        setLiveItems((prev) => {
+          if (prev.length > 0) {
+            setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
+          }
+          return [];
+        });
+        const userItem: UserItem = {
+          kind: "user",
+          text: displayText,
+          imageCount,
+          id: getId(),
+        };
+        setLastUserMessage(displayText);
+        setDoneStatus(null);
+        setLiveItems([userItem]);
       }, []),
     },
   );
@@ -994,7 +1259,7 @@ export function App(props: AppProps) {
     if (pendingFlushRef.current.length > 0) {
       const items = pendingFlushRef.current;
       pendingFlushRef.current = [];
-      setHistory((h) => pruneHistory([...h, ...items]));
+      setHistory((h) => compactHistory([...h, ...trimFlushedItems(items)]));
     }
   });
 
@@ -1004,25 +1269,12 @@ export function App(props: AppProps) {
     setTitleRunning(agentLoop.isRunning);
   }, [agentLoop.activityPhase, agentLoop.isRunning]);
 
-  // Animated thinking border
-  const [thinkingBorderFrame, setThinkingBorderFrame] = useState(0);
-  useEffect(() => {
-    if (agentLoop.activityPhase !== "thinking") return;
-    const timer = setInterval(() => {
-      setThinkingBorderFrame((f) => (f + 1) % THINKING_BORDER_COLORS.length);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [agentLoop.activityPhase]);
-
-  // Success flash on turn completion
-  const [doneFlash, setDoneFlash] = useState(false);
-  useEffect(() => {
-    if (doneStatus) {
-      setDoneFlash(true);
-      const timer = setTimeout(() => setDoneFlash(false), 600);
-      return () => clearTimeout(timer);
-    }
-  }, [doneStatus]);
+  // Animated thinking border — derived from global animation tick
+  const animTick = useAnimationTick();
+  const thinkingBorderFrame =
+    agentLoop.activityPhase === "thinking"
+      ? deriveFrame(animTick, 1000, THINKING_BORDER_COLORS.length)
+      : 0;
 
   const handleSubmit = useCallback(
     async (input: string, inputImages: ImageAttachment[] = [], pasteInfo?: PasteInfo) => {
@@ -1069,7 +1321,7 @@ export function App(props: AppProps) {
             // Send the plan args as a user message to kick off planning
             setLiveItems((prev) => {
               if (prev.length > 0) {
-                setHistory((h) => pruneHistory([...h, ...prev]));
+                setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
               }
               return [];
             });
@@ -1165,7 +1417,33 @@ export function App(props: AppProps) {
         return;
       }
 
-      // Handle prompt-template commands (custom from .gg/commands/ take priority over built-in)
+      // Handle /plan — toggle plan mode
+      if (trimmed === "/plan" || trimmed === "/plan on") {
+        setPlanMode(true);
+        setLiveItems((prev) => [
+          ...prev,
+          { kind: "info", text: "Plan mode activated", id: getId() },
+        ]);
+        return;
+      }
+      if (trimmed === "/plan off") {
+        setPlanMode(false);
+        setLiveItems((prev) => [
+          ...prev,
+          { kind: "info", text: "Plan mode deactivated", id: getId() },
+        ]);
+        return;
+      }
+
+      // Handle /plans — open plan pane
+      if (trimmed === "/plans") {
+        stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+        setPlanAutoExpand(false);
+        setOverlay("plan");
+        return;
+      }
+
+      // Handle prompt-template commands (built-in + custom from .gg/commands/)
       if (trimmed.startsWith("/")) {
         const parts = trimmed.slice(1).split(" ");
         const cmdName = parts[0];
@@ -1184,7 +1462,7 @@ export function App(props: AppProps) {
           // Move live items into history before starting
           setLiveItems((prev) => {
             if (prev.length > 0) {
-              setHistory((h) => pruneHistory([...h, ...prev]));
+              setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
             }
             return [];
           });
@@ -1246,7 +1524,7 @@ export function App(props: AppProps) {
             // Move live items into history before starting
             setLiveItems((prev) => {
               if (prev.length > 0) {
-                setHistory((h) => pruneHistory([...h, ...prev]));
+                setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
               }
               return [];
             });
@@ -1289,7 +1567,7 @@ export function App(props: AppProps) {
           // Move live items into history
           setLiveItems((prev) => {
             if (prev.length > 0) {
-              setHistory((h) => pruneHistory([...h, ...prev]));
+              setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
             }
             return [];
           });
@@ -1375,33 +1653,8 @@ export function App(props: AppProps) {
         }
       }
 
-      // Move any remaining live items into history (Static) before starting new turn
-      setLiveItems((prev) => {
-        if (prev.length > 0) {
-          setHistory((h) => pruneHistory([...h, ...prev]));
-        }
-        return [];
-      });
-
-      // Build display text — strip image paths, show badges instead
+      // ── Build user content (shared by normal + queued paths) ──
       const hasImages = inputImages.length > 0;
-      let displayText = input;
-      if (hasImages) {
-        const { cleanText } = await extractImagePaths(input, props.cwd);
-        displayText = cleanText;
-      }
-      const userItem: UserItem = {
-        kind: "user",
-        text: displayText,
-        imageCount: hasImages ? inputImages.length : undefined,
-        pasteInfo,
-        id: getId(),
-      };
-      setLastUserMessage(input);
-      setDoneStatus(null);
-      setLiveItems([userItem]);
-
-      // Build user content — plain string or content array with images
       const modelInfo = getModel(currentModel);
       const modelSupportsImages = modelInfo?.supportsImages ?? true;
       let userContent: string | (TextContent | ImageContent)[];
@@ -1457,6 +1710,54 @@ export function App(props: AppProps) {
         return;
       }
 
+      // ── Queue message if agent is already running ──
+      if (agentLoop.isRunning) {
+        log(
+          "INFO",
+          "queue",
+          `Queued message: ${trimmed.length > 80 ? trimmed.slice(0, 80) + "..." : trimmed}`,
+        );
+        agentLoop.queueMessage(userContent);
+        let displayText = input;
+        if (hasImages) {
+          const { cleanText } = await extractImagePaths(input, props.cwd);
+          displayText = cleanText;
+        }
+        const queuedItem: QueuedItem = {
+          kind: "queued",
+          text: displayText,
+          imageCount: hasImages ? inputImages.length : undefined,
+          id: getId(),
+        };
+        setLiveItems((prev) => [...prev, queuedItem]);
+        return;
+      }
+
+      // Move any remaining live items into history (Static) before starting new turn
+      setLiveItems((prev) => {
+        if (prev.length > 0) {
+          setHistory((h) => compactHistory([...h, ...trimFlushedItems(prev)]));
+        }
+        return [];
+      });
+
+      // Build display text — strip image paths, show badges instead
+      let displayText = input;
+      if (hasImages) {
+        const { cleanText } = await extractImagePaths(input, props.cwd);
+        displayText = cleanText;
+      }
+      const userItem: UserItem = {
+        kind: "user",
+        text: displayText,
+        imageCount: hasImages ? inputImages.length : undefined,
+        pasteInfo,
+        id: getId(),
+      };
+      setLastUserMessage(input);
+      setDoneStatus(null);
+      setLiveItems([userItem]);
+
       // Run agent
       try {
         await agentLoop.run(userContent);
@@ -1497,7 +1798,7 @@ export function App(props: AppProps) {
 
   const handleAbort = useCallback(() => {
     if (agentLoop.isRunning) {
-      // Clear queued messages when aborting
+      agentLoop.clearQueue();
       queuedMessageRef.current = null;
       agentLoop.abort();
     } else {
@@ -1617,6 +1918,7 @@ export function App(props: AppProps) {
       { name: "plan", aliases: [], description: "Toggle plan mode (read-only exploration)" },
       { name: "mcp", aliases: [], description: "Manage MCP servers" },
       { name: "quit", aliases: ["q", "exit"], description: "Exit the agent" },
+      { name: "plans", aliases: [], description: "Open plans pane" },
       // Built-in prompt commands, excluding any overridden by custom commands
       ...PROMPT_COMMANDS.filter((cmd) => !customNames.has(cmd.name)).map((cmd) => ({
         name: cmd.name,
@@ -1637,6 +1939,8 @@ export function App(props: AppProps) {
 
   const renderItem = (item: CompletedItem) => {
     switch (item.kind) {
+      case "tombstone":
+        return null;
       case "banner":
         return (
           <Banner
@@ -1692,6 +1996,8 @@ export function App(props: AppProps) {
             isError={item.isError}
           />
         );
+      case "tool_group":
+        return <ToolGroupExecution key={item.id} tools={item.tools} />;
       case "server_tool_start":
         return (
           <ServerToolExecution
@@ -1710,18 +2016,19 @@ export function App(props: AppProps) {
             name={item.name}
             input={item.input}
             durationMs={item.durationMs}
+            resultType={item.resultType}
           />
         );
       case "error": {
         const providerHint = getProviderErrorHint(item.message);
         return (
-          <Box key={item.id} marginTop={1} flexDirection="column">
-            <Text color={theme.error}>
+          <Box key={item.id} marginTop={1} flexDirection="column" flexShrink={1}>
+            <Text color={theme.error} wrap="wrap">
               {"✗ "}
               {item.message}
             </Text>
             {providerHint && (
-              <Text color={theme.textDim}>
+              <Text color={theme.textDim} wrap="wrap">
                 {"  Hint: "}
                 {providerHint}
               </Text>
@@ -1731,8 +2038,24 @@ export function App(props: AppProps) {
       }
       case "info":
         return (
+          <Box key={item.id} marginTop={1} flexShrink={1}>
+            <Text color={theme.textDim} wrap="wrap">
+              {item.text}
+            </Text>
+          </Box>
+        );
+      case "queued":
+        return (
           <Box key={item.id} marginTop={1}>
-            <Text color={theme.textDim}>{item.text}</Text>
+            <Text color={theme.accent} bold>
+              {"⏳ Queued: "}
+            </Text>
+            <Text color={theme.text} wrap="wrap">
+              {item.text}
+              {item.imageCount
+                ? ` (+${item.imageCount} image${item.imageCount > 1 ? "s" : ""})`
+                : ""}
+            </Text>
           </Box>
         );
       case "compacting":
@@ -1819,10 +2142,10 @@ export function App(props: AppProps) {
     runAllTasksRef.current = runAllTasks;
   }, [runAllTasks]);
 
-  const isFullscreenOverlay = overlay === "tasks" || overlay === "agents" || overlay === "mcp";
+  const isFullscreenOverlay = overlay === "tasks" || overlay === "agents" || overlay === "mcp" || overlay === "skills" || overlay === "plan";
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={columns}>
       {/* History — scrolled up, managed by Ink Static. */}
       <Static
         key={`${resizeKey}-${staticKey}`}
@@ -1907,6 +2230,82 @@ export function App(props: AppProps) {
             }
           }}
         />
+      ) : overlay === "skills" ? (
+        <SkillsOverlay
+          cwd={props.cwd}
+          onClose={() => {
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setStaticKey((k) => k + 1);
+            setOverlay(null);
+          }}
+        />
+      ) : overlay === "plan" ? (
+        <PlanOverlay
+          cwd={props.cwd}
+          autoExpandNewest={planAutoExpand}
+          onClose={() => {
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setStaticKey((k) => k + 1);
+            setPlanAutoExpand(false);
+            setOverlay(null);
+          }}
+          onApprove={(planPath) => {
+            // Store approved plan path — will be injected into the new system prompt
+            approvedPlanPathRef.current = planPath;
+
+            // Clear session for a fresh context focused on the plan
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setHistory([{ kind: "banner", id: "banner" }]);
+            setLiveItems([]);
+            setStaticKey((k) => k + 1);
+            setPlanAutoExpand(false);
+            setOverlay(null);
+
+            // Rebuild system prompt with the approved plan, then reset the session
+            void (async () => {
+              const newPrompt = await buildSystemPrompt(props.cwd, props.skills, false, planPath);
+              messagesRef.current = [{ role: "system" as const, content: newPrompt }];
+              agentLoop.reset();
+              persistedIndexRef.current = messagesRef.current.length;
+
+              // Create a new session file
+              const sm = sessionManagerRef.current;
+              if (sm) {
+                const s = await sm.create(props.cwd, currentProvider, currentModel);
+                sessionPathRef.current = s.path;
+              }
+
+              // Start implementation with a clean context
+              setLiveItems([
+                {
+                  kind: "info",
+                  text: "Plan approved — starting fresh session for implementation",
+                  id: getId(),
+                },
+              ]);
+              setDoneStatus(null);
+              await agentLoop.run(
+                "The plan has been approved. Implement it now, following each step in order.",
+              );
+            })();
+          }}
+          onReject={(planPath, feedback) => {
+            stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+            setStaticKey((k) => k + 1);
+            setPlanAutoExpand(false);
+            setOverlay(null);
+            setDoneStatus(null);
+            // Send rejection + feedback to the agent
+            const msg =
+              `The plan at ${planPath} was rejected.\n\nFeedback: ${feedback}\n\n` +
+              `Please revise the plan based on this feedback.`;
+            setLiveItems((prev) => [
+              ...prev,
+              { kind: "info", text: `Plan rejected — "${feedback}"`, id: getId() },
+            ]);
+            void agentLoop.run(msg);
+          }}
+        />
       ) : (
         <>
           {/* Content area */}
@@ -1918,6 +2317,7 @@ export function App(props: AppProps) {
               streamingThinking={agentLoop.streamingThinking}
               showThinking={props.showThinking}
               thinkingMs={agentLoop.thinkingMs}
+              planMode={planMode}
             />
           </Box>
 
@@ -1935,6 +2335,7 @@ export function App(props: AppProps) {
               }
               paddingLeft={1}
               paddingRight={1}
+              width={columns}
             >
               <ActivityIndicator
                 phase={agentLoop.activityPhase}
@@ -1944,104 +2345,18 @@ export function App(props: AppProps) {
                 tokenEstimate={agentLoop.streamedTokenEstimate}
                 userMessage={lastUserMessage}
                 activeToolNames={agentLoop.activeToolCalls.map((tc) => tc.name)}
+                planMode={planMode}
               />
             </Box>
           ) : (
             doneStatus && (
               <Box marginTop={1}>
-                <Text color={doneFlash ? theme.success : theme.textDim}>
+                <Text color={theme.success}>
                   {"✻ "}
                   {doneStatus.verb} {formatDuration(doneStatus.durationMs)}
                 </Text>
               </Box>
             )
-          )}
-
-          {/* Plan review overlay */}
-          {showPlanReview && planManagerRef.current.planContent && (
-            <PlanOverlay
-              planContent={planManagerRef.current.planContent}
-              planFilePath={planManagerRef.current.planFilePath}
-              onApprove={({ clearContext }) => {
-                const pm = planManagerRef.current;
-                const plan = pm.planContent ?? "";
-                pm.approve();
-                setLiveItems((prev) => [
-                  ...prev,
-                  { kind: "info", text: "✅ Plan approved — executing…", id: getId() },
-                ]);
-                if (clearContext) {
-                  // Compact the conversation first, then resume
-                  void compactConversation(messagesRef.current).then((compacted) => {
-                    messagesRef.current = compacted;
-                    void agentLoop.run(
-                      `The user approved the plan. Now execute it step by step.\n\nHere is the approved plan:\n\n${plan}`,
-                    );
-                  });
-                } else {
-                  // Resume the agent loop to execute the approved plan
-                  void agentLoop.run(
-                    `The user approved the plan. Now execute it step by step.\n\nHere is the approved plan:\n\n${plan}`,
-                  );
-                }
-              }}
-              onReject={(feedback) => {
-                const pm = planManagerRef.current;
-                pm.reject(feedback);
-                setLiveItems((prev) => [
-                  ...prev,
-                  { kind: "info", text: `📝 Plan rejected — revising with feedback`, id: getId() },
-                ]);
-                // Re-run with feedback
-                void agentLoop.run(
-                  `The user rejected the plan with this feedback: ${feedback}\n\nPlease revise the plan.`,
-                );
-              }}
-              onCancel={() => {
-                const pm = planManagerRef.current;
-                pm.cancel();
-                setLiveItems((prev) => [
-                  ...prev,
-                  { kind: "info", text: "Plan cancelled", id: getId() },
-                ]);
-              }}
-              onEdit={async () => {
-                const filePath = planManagerRef.current.planFilePath;
-                if (!filePath) return;
-
-                const editor = process.env.VISUAL || process.env.EDITOR || "vi";
-                const { spawnSync } = await import("node:child_process");
-
-                // Exit Ink's raw mode so the editor gets a clean terminal
-                if (process.stdin.isTTY) {
-                  process.stdin.setRawMode(false);
-                }
-                // Clear screen before handing off to editor
-                stdout?.write("\x1b[?1049h"); // switch to alternate screen buffer
-
-                const result = spawnSync(editor, [filePath], {
-                  stdio: "inherit",
-                  shell: true,
-                });
-
-                // Restore terminal for Ink
-                stdout?.write("\x1b[?1049l"); // switch back from alternate screen buffer
-                if (process.stdin.isTTY) {
-                  process.stdin.setRawMode(true);
-                  process.stdin.resume();
-                }
-
-                if (result.status !== 0) {
-                  log("WARN", "plan-mode", `Editor exited with status ${result.status}`);
-                }
-
-                // Re-read the file after editing
-                const { readFileSync } = await import("node:fs");
-                const updated = readFileSync(filePath, "utf-8");
-                planManagerRef.current.updatePlanContent(updated);
-                log("INFO", "plan-mode", `Plan updated after editor (${updated.length} chars)`);
-              }}
-            />
           )}
 
           {/* AskUserQuestion overlay — shown when agent calls ask_user_question tool */}
@@ -2100,6 +2415,16 @@ export function App(props: AppProps) {
             />
           )}
 
+          {/* Queue indicator */}
+          {agentLoop.queuedCount > 0 && (
+            <Box marginTop={1}>
+              <Text color={theme.accent}>
+                {"⏳ "}
+                {agentLoop.queuedCount} message{agentLoop.queuedCount > 1 ? "s" : ""} queued
+              </Text>
+            </Box>
+          )}
+
           {/* Input + Footer */}
           <InputArea
             onSubmit={handleSubmit}
@@ -2113,6 +2438,19 @@ export function App(props: AppProps) {
             onToggleTasks={() => {
               stdout?.write("\x1b[2J\x1b[3J\x1b[H");
               setOverlay("tasks");
+            }}
+            onToggleSkills={() => {
+              stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+              setOverlay("skills");
+            }}
+            onTogglePlanMode={() => {
+              const next = !planMode;
+              setPlanMode(next);
+              log("INFO", "plan", `Plan mode ${next ? "enabled" : "disabled"}`);
+              setLiveItems((items) => [
+                ...items,
+                { kind: "info", text: `Plan mode ${next ? "on" : "off"}`, id: getId() },
+              ]);
             }}
             cwd={props.cwd}
             commands={allCommands}
@@ -2132,7 +2470,7 @@ export function App(props: AppProps) {
               cwd={props.cwd}
               gitBranch={gitBranch}
               thinkingEnabled={thinkingEnabled}
-              planModeActive={planModeState === "planning"}
+              planMode={planMode}
             />
           )}
           {bgTasks.length > 0 && (

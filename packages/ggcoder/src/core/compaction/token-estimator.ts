@@ -1,6 +1,28 @@
 import type { Message, ContentPart, ToolResult } from "@kenkaiiii/gg-ai";
 
-const CHARS_PER_TOKEN = 4;
+/**
+ * Model-family-specific chars-per-token ratios.
+ * These are empirically measured averages for English text.
+ * CJK/code/mixed content will vary, but these are better than a flat 4.0.
+ */
+const MODEL_FAMILY_RATIOS: Record<string, number> = {
+  // Anthropic models: ~3.2 chars/token (BPE tokenizer, slightly more compact)
+  claude: 3.2,
+  // OpenAI models: ~3.7 chars/token (cl100k_base / o200k_base)
+  gpt: 3.7,
+  o1: 3.7,
+  o3: 3.7,
+  o4: 3.7,
+  // GLM models: ~2.5 chars/token (mixed CJK/English tokenizer)
+  glm: 2.5,
+  // Moonshot/Kimi: ~2.8 chars/token (multilingual tokenizer)
+  kimi: 2.8,
+  moonshot: 2.8,
+};
+
+/** Default ratio when model family is unknown */
+const DEFAULT_CHARS_PER_TOKEN = 3.5;
+
 const PER_MESSAGE_OVERHEAD = 4; // tokens
 
 /**
@@ -11,8 +33,28 @@ const PER_MESSAGE_OVERHEAD = 4; // tokens
 const IMAGE_BASE_TOKENS = 800;
 const IMAGE_BYTES_PER_TOKEN = 750;
 
+/** Active model name, set via setEstimatorModel(). Used to select the right ratio. */
+let activeModel = "";
+
+/**
+ * Set the active model name for token estimation.
+ * Call this when the model changes so estimates use the correct ratio.
+ */
+export function setEstimatorModel(model: string): void {
+  activeModel = model;
+}
+
+function getCharsPerToken(): number {
+  if (!activeModel) return DEFAULT_CHARS_PER_TOKEN;
+  const lower = activeModel.toLowerCase();
+  for (const [prefix, ratio] of Object.entries(MODEL_FAMILY_RATIOS)) {
+    if (lower.startsWith(prefix)) return ratio;
+  }
+  return DEFAULT_CHARS_PER_TOKEN;
+}
+
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
+  return Math.ceil(text.length / getCharsPerToken());
 }
 
 /** Estimate tokens for an image from its base64 data length. */

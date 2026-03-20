@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useMemo } from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
+import { useAnimationTick, deriveFrame } from "./AnimationContext.js";
 
 // ── Color pulse cycle ─────────────────────────────────────
 
@@ -147,44 +148,16 @@ interface ThinkingIndicatorProps {
 
 export function ThinkingIndicator({ userMessage = "" }: ThinkingIndicatorProps) {
   const theme = useTheme();
+  const tick = useAnimationTick();
 
-  // Spinner frame
-  const [spinnerFrame, setSpinnerFrame] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setSpinnerFrame((f) => (f + 1) % SPINNER_FRAMES.length);
-    }, SPINNER_INTERVAL);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Color pulse
-  const [colorFrame, setColorFrame] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setColorFrame((f) => (f + 1) % PULSE_COLORS.length);
-    }, PULSE_INTERVAL);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Ellipsis
-  const [ellipsisFrame, setEllipsisFrame] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setEllipsisFrame((f) => (f + 1) % ELLIPSIS_FRAMES.length);
-    }, ELLIPSIS_INTERVAL);
-    return () => clearInterval(timer);
-  }, []);
+  // Derive all animation frames from the single global tick
+  const spinnerFrame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
+  const colorFrame = deriveFrame(tick, PULSE_INTERVAL, PULSE_COLORS.length);
+  const ellipsisFrame = deriveFrame(tick, ELLIPSIS_INTERVAL, ELLIPSIS_FRAMES.length);
 
   // Phrase rotation — pick phrases based on user message, shuffle, rotate
   const phrases = useMemo(() => shuffleArray(selectPhrases(userMessage)), [userMessage]);
-  const [phraseIndex, setPhraseIndex] = useState(0);
-  useEffect(() => {
-    setPhraseIndex(0);
-    const timer = setInterval(() => {
-      setPhraseIndex((i) => (i + 1) % phrases.length);
-    }, PHRASE_INTERVAL);
-    return () => clearInterval(timer);
-  }, [phrases]);
+  const phraseIndex = deriveFrame(tick, PHRASE_INTERVAL, phrases.length);
 
   const spinnerColor = PULSE_COLORS[colorFrame];
   const phrase = phrases[phraseIndex];

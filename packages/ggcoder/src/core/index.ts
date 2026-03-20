@@ -15,6 +15,7 @@ export {
   type MessageEntry,
   type SessionInfo,
   type SessionHeader,
+  type BranchInfo,
 } from "./session-manager.js";
 export { AgentSession, type AgentSessionOptions, type AgentSessionState } from "./agent-session.js";
 export {
@@ -33,4 +34,5 @@ export {
   estimateTokens,
   estimateMessageTokens,
   estimateConversationTokens,
+  setEstimatorModel,
 } from "./compaction/token-estimator.js";

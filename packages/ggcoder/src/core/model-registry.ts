@@ -17,7 +17,7 @@ export const MODELS: ModelInfo[] = [
     id: "claude-opus-4-6",
     name: "Claude Opus 4.6",
     provider: "anthropic",
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
     supportsThinking: true,
     supportsImages: true,
@@ -27,7 +27,7 @@ export const MODELS: ModelInfo[] = [
     id: "claude-sonnet-4-6",
     name: "Claude Sonnet 4.6",
     provider: "anthropic",
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
     maxOutputTokens: 64_000,
     supportsThinking: true,
     supportsImages: true,
@@ -78,6 +78,16 @@ export const MODELS: ModelInfo[] = [
   {
     id: "glm-4.7",
     name: "GLM-4.7",
+    provider: "glm",
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: true,
+    supportsImages: false,
+    costTier: "low",
+  },
+  {
+    id: "glm-4.7-flash",
+    name: "GLM-4.7 Flash",
     provider: "glm",
     contextWindow: 128_000,
     maxOutputTokens: 16_384,
@@ -144,17 +154,18 @@ export function getContextWindow(modelId: string): number {
  * Get the model to use for compaction summarization.
  * - Anthropic: always Sonnet 4.6
  * - OpenAI: cheapest (Codex Mini)
- * - GLM / Moonshot: use the current model (no cheap alternative)
+ * - GLM: GLM-4.7 Flash (cheap alternative)
+ * - Moonshot: use the current model (no cheap alternative)
  */
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "anthropic") {
     return MODELS.find((m) => m.id === "claude-sonnet-4-6")!;
   }
-  if (provider === "openai") {
+  if (provider === "openai" || provider === "glm") {
     const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
     if (low) return low;
   }
-  // GLM, Moonshot, or fallback: use current model
+  // Moonshot or fallback: use current model
   return getModel(currentModelId) ?? getDefaultModel(provider);
 }
 

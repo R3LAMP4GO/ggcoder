@@ -22,7 +22,7 @@ export function UserMessage({
 
   return (
     <Box marginTop={1} flexDirection="column">
-      <Box paddingX={1} paddingY={0}>
+      <Box>
         <Text wrap="wrap" color="white" backgroundColor="gray">
           <Text color={theme.inputPrompt} backgroundColor="gray">
             {"❯ "}

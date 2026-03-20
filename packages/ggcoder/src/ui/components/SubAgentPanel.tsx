@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React from "react";
 import { Text, Box } from "ink";
 import { useTheme } from "../theme/theme.js";
 import { SPINNER_FRAMES, SPINNER_INTERVAL } from "../spinner-frames.js";
+import { useAnimationTick, deriveFrame } from "./AnimationContext.js";
+import { useTerminalSize } from "../hooks/useTerminalSize.js";
 
 export interface SubAgentInfo {
   toolCallId: string;
@@ -34,28 +36,29 @@ function formatDuration(ms: number): string {
   return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
 }
 
+// Tree-drawing prefix widths (visual characters):
+// "├─ " or "└─ " = 3 chars;  "│  " or "   " = 3 chars;  "⎿ " = 2 chars
+const BRANCH_WIDTH = 3; // "├─ " / "└─ "
+const DETAIL_PREFIX_WIDTH = 5; // continuation (3) + "⎿ " (2)
+
 const AgentRow = React.memo(
   function AgentRow({
     agent,
     isLast,
     aborted,
+    columns,
   }: {
     agent: SubAgentInfo;
     isLast: boolean;
     aborted: boolean;
+    columns: number;
   }) {
     const theme = useTheme();
     const isRunning = agent.status === "running" && !aborted;
 
-    // Spinner for running agents
-    const [frame, setFrame] = useState(0);
-    useEffect(() => {
-      if (!isRunning) return;
-      const timer = setInterval(() => {
-        setFrame((f) => (f + 1) % SPINNER_FRAMES.length);
-      }, SPINNER_INTERVAL);
-      return () => clearInterval(timer);
-    }, [isRunning]);
+    // Derive spinner frame from global animation tick
+    const tick = useAnimationTick();
+    const frame = deriveFrame(tick, SPINNER_INTERVAL, SPINNER_FRAMES.length);
 
     const branch = isLast ? "└─" : "├─";
     const continuation = isLast ? "   " : "│  ";
@@ -64,18 +67,23 @@ const AgentRow = React.memo(
 
     const totalTokens = agent.tokenUsage.input + agent.tokenUsage.output;
 
+    // Width budgets for content (excluding prefix columns)
+    const taskContentWidth = Math.max(10, columns - BRANCH_WIDTH);
+    const detailContentWidth = Math.max(10, columns - DETAIL_PREFIX_WIDTH);
+
     // Status detail line shown below the task name
     let detail: React.ReactNode;
     if (isRunning) {
+      const activity = agent.currentActivity ?? "Starting…";
       detail = (
-        <Text>
+        <Text wrap="wrap">
           <Text color={theme.primary}>{SPINNER_FRAMES[frame]} </Text>
-          <Text color={theme.textDim}>{agent.currentActivity ?? "Starting…"}</Text>
+          <Text color={theme.textDim}>{activity}</Text>
         </Text>
       );
     } else if (agent.status === "done") {
       detail = (
-        <Text color={theme.textDim}>
+        <Text color={theme.textDim} wrap="wrap">
           {formatTokens(totalTokens)} tokens
           {" · "}
           {agent.toolUseCount} tool use{agent.toolUseCount !== 1 ? "s" : ""}
@@ -85,7 +93,7 @@ const AgentRow = React.memo(
     } else {
       // error or aborted
       detail = (
-        <Text color={theme.error}>
+        <Text color={theme.error} wrap="wrap">
           {agent.status === "aborted" ? "Interrupted" : "Failed"}
           {agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}
         </Text>
@@ -94,25 +102,39 @@ const AgentRow = React.memo(
 
     return (
       <Box flexDirection="column">
-        {/* Task name line */}
-        <Box>
-          <Text color={theme.textDim}>{branch} </Text>
-          <Text bold={isRunning} color={agent.status === "done" ? theme.success : undefined}>
-            {agent.status === "done" ? "✓ " : agent.status === "error" ? "✗ " : ""}
-          </Text>
-          {agent.agentName && agent.agentName !== "default" && (
-            <Text color={theme.accent} dimColor={!isRunning}>
-              {"["}
-              {agent.agentName}
-              {"] "}
+        {/* Task name line: fixed-width prefix + wrapping content */}
+        <Box flexDirection="row">
+          <Box width={BRANCH_WIDTH} flexShrink={0}>
+            <Text color={theme.textDim}>{branch}</Text>
+          </Box>
+          <Box flexGrow={1} width={taskContentWidth}>
+            <Text
+              bold={isRunning}
+              wrap="wrap"
+              color={agent.status === "done" ? theme.success : undefined}
+            >
+              {agent.status === "done" ? "✓ " : agent.status === "error" ? "✗ " : ""}
             </Text>
-          )}
-          <Text bold={isRunning}>{taskDisplay}</Text>
+            {agent.agentName && agent.agentName !== "default" && (
+              <Text color={theme.accent} dimColor={!isRunning}>
+                {"["}
+                {agent.agentName}
+                {"] "}
+              </Text>
+            )}
+            <Text bold={isRunning} wrap="wrap">
+              {taskDisplay}
+            </Text>
+          </Box>
         </Box>
-        {/* Detail line */}
-        <Box>
-          <Text color={theme.textDim}>{continuation}⎿ </Text>
-          {detail}
+        {/* Detail line: fixed-width prefix + wrapping content */}
+        <Box flexDirection="row">
+          <Box width={DETAIL_PREFIX_WIDTH} flexShrink={0}>
+            <Text color={theme.textDim}>{continuation}⎿ </Text>
+          </Box>
+          <Box flexGrow={1} width={detailContentWidth}>
+            {detail}
+          </Box>
         </Box>
       </Box>
     );
@@ -120,7 +142,11 @@ const AgentRow = React.memo(
   (prev, next) => {
     // Skip re-render for completed agents — their display is static
     if (prev.agent.status !== "running" && next.agent.status !== "running") {
-      return prev.isLast === next.isLast && prev.agent.status === next.agent.status;
+      return (
+        prev.isLast === next.isLast &&
+        prev.agent.status === next.agent.status &&
+        prev.columns === next.columns
+      );
     }
     // For running agents, always re-render (spinner, activity, tokens change)
     return false;
@@ -129,11 +155,16 @@ const AgentRow = React.memo(
 
 export function SubAgentPanel({ agents, aborted = false }: SubAgentPanelProps) {
   const theme = useTheme();
+  const { columns } = useTerminalSize();
 
   if (agents.length === 0) return null;
 
   const runningCount = agents.filter((a) => a.status === "running").length;
   const allDone = runningCount === 0;
+
+  // "⏺ " prefix = 2 chars — content area gets the rest
+  const HEADER_PREFIX = 2;
+  const contentColumns = Math.max(10, columns - HEADER_PREFIX);
 
   const headerText = aborted
     ? `${agents.length} agent${agents.length !== 1 ? "s" : ""} interrupted`
@@ -141,30 +172,22 @@ export function SubAgentPanel({ agents, aborted = false }: SubAgentPanelProps) {
       ? `${agents.length} agent${agents.length !== 1 ? "s" : ""} completed`
       : `${agents.length} agent${agents.length !== 1 ? "s" : ""} launched`;
 
-  // Stable height: track the peak number of agents so the panel never shrinks
-  // when agents complete. This prevents Ink's live-area height from fluctuating,
-  // which causes viewport jumping during rapid re-renders.
-  const peakAgentCount = React.useRef(0);
-  if (agents.length > peakAgentCount.current) {
-    peakAgentCount.current = agents.length;
-  }
-
-  // Each agent row is 2 lines (task + detail), plus 1 line for the header.
-  // Reserve height based on peak count so the panel never shrinks mid-execution.
-  const hasRunning = agents.some((a) => a.status === "running");
-  const stableMinHeight = hasRunning ? 1 + peakAgentCount.current * 2 : undefined;
-
   return (
-    <Box marginTop={1} minHeight={stableMinHeight}>
-      <Text color={theme.primary}>{"⏺ "}</Text>
-      <Box flexDirection="column" flexShrink={1}>
-        <Text bold>{headerText}</Text>
+    <Box marginTop={1} flexDirection="row">
+      <Box width={HEADER_PREFIX} flexShrink={0}>
+        <Text color={theme.primary}>{"⏺ "}</Text>
+      </Box>
+      <Box flexDirection="column" flexGrow={1} width={contentColumns}>
+        <Text bold wrap="wrap">
+          {headerText}
+        </Text>
         {agents.map((agent, i) => (
           <AgentRow
             key={agent.toolCallId}
             agent={agent}
             isLast={i === agents.length - 1}
             aborted={aborted}
+            columns={contentColumns}
           />
         ))}
       </Box>

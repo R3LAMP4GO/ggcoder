@@ -8,9 +8,12 @@ import type { PlanModeManager } from "../core/plan-mode.js";
 import type { AgentDefinition } from "../core/agents.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
+import type { Skill } from "../core/skills.js";
 import { App, type CompletedItem } from "./App.js";
 import { ThemeContext, loadTheme } from "./theme/theme.js";
 import { detectTheme } from "./theme/detect-theme.js";
+import { AnimationProvider } from "./components/AnimationContext.js";
+import { TerminalSizeProvider } from "./hooks/useTerminalSize.js";
 
 export interface RenderAppConfig {
   provider: Provider;
@@ -40,6 +43,10 @@ export interface RenderAppConfig {
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
+  planModeRef?: { current: boolean };
+  onEnterPlanRef?: { current: (reason?: string) => void };
+  onExitPlanRef?: { current: (planPath: string) => Promise<string> };
+  skills?: Skill[];
 }
 
 export async function renderApp(config: RenderAppConfig): Promise<void> {
@@ -47,41 +54,51 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   const resolvedTheme = themeSetting === "auto" ? await detectTheme() : themeSetting;
   const theme = loadTheme(resolvedTheme);
 
-  // Clear screen
-  process.stdout.write("\x1b[2J\x1b[H");
+  // Clear screen + scrollback so old commands don't appear above the TUI
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
 
   const { waitUntilExit, clear } = render(
     React.createElement(
       ThemeContext.Provider,
       { value: theme },
-      React.createElement(App, {
-        provider: config.provider,
-        model: config.model,
-        tools: config.tools,
-        webSearch: config.webSearch,
-        messages: config.messages,
-        maxTokens: config.maxTokens,
-        thinking: config.thinking,
-        apiKey: config.apiKey,
-        baseUrl: config.baseUrl,
-        accountId: config.accountId,
-        cwd: config.cwd,
-        version: config.version,
-        showThinking: config.showThinking,
-        showTokenUsage: config.showTokenUsage,
-        onSlashCommand: config.onSlashCommand,
-        loggedInProviders: config.loggedInProviders,
-        credentialsByProvider: config.credentialsByProvider,
-        initialHistory: config.initialHistory,
-        sessionsDir: config.sessionsDir,
-        sessionPath: config.sessionPath,
-        processManager: config.processManager,
-        planModeManager: config.planModeManager,
-        agents: config.agents,
-        settingsFile: config.settingsFile,
-        mcpManager: config.mcpManager,
-        authStorage: config.authStorage,
-      }),
+      React.createElement(
+        TerminalSizeProvider,
+        null,
+        React.createElement(
+          AnimationProvider,
+          null,
+          React.createElement(App, {
+            provider: config.provider,
+            model: config.model,
+            tools: config.tools,
+            webSearch: config.webSearch,
+            messages: config.messages,
+            maxTokens: config.maxTokens,
+            thinking: config.thinking,
+            apiKey: config.apiKey,
+            baseUrl: config.baseUrl,
+            accountId: config.accountId,
+            cwd: config.cwd,
+            version: config.version,
+            showThinking: config.showThinking,
+            showTokenUsage: config.showTokenUsage,
+            onSlashCommand: config.onSlashCommand,
+            loggedInProviders: config.loggedInProviders,
+            credentialsByProvider: config.credentialsByProvider,
+            initialHistory: config.initialHistory,
+            sessionsDir: config.sessionsDir,
+            sessionPath: config.sessionPath,
+            processManager: config.processManager,
+            settingsFile: config.settingsFile,
+            mcpManager: config.mcpManager,
+            authStorage: config.authStorage,
+            planModeRef: config.planModeRef,
+            onEnterPlanRef: config.onEnterPlanRef,
+            onExitPlanRef: config.onExitPlanRef,
+            skills: config.skills,
+          }),
+        ),
+      ),
     ),
     {
       // Enable kitty keyboard protocol so terminals that support it can
@@ -99,19 +116,25 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
     },
   );
 
-  // Resize handling (terminal clear + Static remount) is done inside the
-  // React tree via the useTerminalSize hook, which debounces 300ms then
-  // clears screen+scrollback and bumps a resizeKey to force Ink to
-  // re-render <Static> content.  The render.ts layer only needs to call
-  // clear() so Ink forgets its stale line-count tracking.
+  // Resize handling: debounce Ink's clear() so it only fires once after the
+  // user finishes dragging.  Previously clear() fired on every resize event
+  // (many per drag), causing Ink to lose its line tracking and re-render the
+  // live area at new positions — leaving ghost/duplicate copies in scrollback.
+  // The React-side useTerminalSize hook handles screen clearing and Static
+  // remount via its own 300ms debounce + resizeKey bump.
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   const onResize = () => {
-    clear();
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      clear();
+    }, 300);
   };
   process.stdout.on("resize", onResize);
 
   await waitUntilExit();
 
   process.stdout.off("resize", onResize);
+  if (resizeTimer) clearTimeout(resizeTimer);
 
   // Print resume session message after Ink unmounts (similar to Claude Code)
   const dim = chalk.hex("#6b7280");
@@ -119,7 +142,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   const hint = chalk.hex("#60a5fa");
 
   process.stdout.write("\n");
-  process.stdout.write(dim("  Catch you later! ✌️\n"));
+  process.stdout.write(dim("  Catch you later!\n"));
   process.stdout.write("\n");
   process.stdout.write(dim("  To resume this session:\n"));
   process.stdout.write(hint("    ggcoder continue\n"));

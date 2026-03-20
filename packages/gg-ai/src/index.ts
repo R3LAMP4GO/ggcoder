@@ -1,6 +1,10 @@
 // Core entry point
 export { stream } from "./stream.js";
 
+// Provider registry
+export { providerRegistry } from "./provider-registry.js";
+export type { ProviderStreamFn, ProviderEntry } from "./provider-registry.js";
+
 // Types
 export type {
   Provider,

@@ -1,14 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { formatSkillsForPrompt, type Skill } from "./core/skills.js";
-import { PLAN_MODE_SYSTEM_PROMPT, type PlanModeState } from "./core/plan-mode.js";
-
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".cursorrules", "CONVENTIONS.md"];
-
-export interface BuildSystemPromptOptions {
-  skills?: Skill[];
-  planModeState?: PlanModeState;
-}
 
 /**
  * Build a short system reminder for plan mode constraints.
@@ -52,17 +45,10 @@ export function buildPlanModeExitReminder(
  */
 export async function buildSystemPrompt(
   cwd: string,
-  skillsOrOpts?: Skill[] | BuildSystemPromptOptions,
+  skills?: Skill[],
+  planMode?: boolean,
+  approvedPlanPath?: string,
 ): Promise<string> {
-  // Support both old signature (skills array) and new options object
-  let skills: Skill[] | undefined;
-  let planModeState: PlanModeState | undefined;
-  if (Array.isArray(skillsOrOpts)) {
-    skills = skillsOrOpts;
-  } else if (skillsOrOpts) {
-    skills = skillsOrOpts.skills;
-    planModeState = skillsOrOpts.planModeState;
-  }
   const sections: string[] = [];
 
   // 1. Identity
@@ -98,6 +84,46 @@ export async function buildSystemPrompt(
       `- If you encounter unexpected state (unfamiliar files, branches, locks), investigate before overwriting or deleting — it may be the user's in-progress work.`,
   );
 
+  // 2b. Plan mode
+  if (planMode) {
+    sections.push(
+      `## Plan Mode (ACTIVE)\n\n` +
+        `You are in PLAN MODE. Research and design an implementation plan before writing any code.\n\n` +
+        `### Workflow\n` +
+        `1. Explore: Use read, grep, find, ls to understand the codebase\n` +
+        `2. Research: Use web_fetch for documentation and best practices\n` +
+        `3. Draft: Write a structured plan to .gg/plans/<name>.md\n` +
+        `4. Submit: Call exit_plan with the plan path for user review\n\n` +
+        `### Rules\n` +
+        `- DO NOT use bash, edit, write (except to .gg/plans/), or subagent — they are restricted\n` +
+        `- Be specific: list exact file paths, function names, line numbers\n` +
+        `- Include step-by-step implementation order with dependencies\n` +
+        `- Note risks and verification criteria`,
+    );
+  }
+
+  // 2c. Approved plan — injected when a plan has been approved for implementation
+  if (approvedPlanPath && !planMode) {
+    let planContent = "";
+    try {
+      planContent = await fs.readFile(approvedPlanPath, "utf-8");
+    } catch {
+      // Plan file not found — skip injection
+    }
+    if (planContent.trim()) {
+      sections.push(
+        `## Approved Plan\n\n` +
+          `An approved implementation plan is available. Read and follow it strictly during implementation.\n\n` +
+          `**Plan file:** ${approvedPlanPath}\n\n` +
+          `<approved_plan>\n${planContent.trim()}\n</approved_plan>\n\n` +
+          `### Rules\n` +
+          `- Follow the plan's step-by-step implementation order\n` +
+          `- Do not deviate from the plan without user confirmation\n` +
+          `- If you encounter issues not covered by the plan, ask the user`,
+      );
+    }
+  }
+
   // 3. Code Quality
   sections.push(
     `## Code Quality\n\n` +
@@ -115,10 +141,9 @@ export async function buildSystemPrompt(
       `- **read**: Read file contents. Use offset/limit for large files.\n` +
       `- **edit**: Surgical changes to existing files. The old_text must uniquely match one location.\n` +
       `- **write**: Create new files or complete rewrites. Prefer edit for small changes.\n` +
-      `- **bash**: Run commands (tests, builds, git, installs). The shell already runs in the project working directory — don't \`cd\` into it redundantly. Use \`cd\` only when you need a different directory. Check exit code and output for errors. Use non-interactive flags where needed (e.g. \`--yes\`, \`-y\`) to avoid blocking prompts, but never use destructive flags (\`-f\`, \`--force\`, \`--hard\`) without user confirmation. Set \`run_in_background=true\` for long-running processes (dev servers, watchers) — returns a process ID immediately.\n` +
-      `- **find**: Discover project structure before diving into code. Map out directories and files.\n` +
+      `- **bash**: Run commands (tests, builds, git, installs). The shell already runs in the project working directory — don't \`cd\` into it redundantly. Check exit code and output for errors. Use non-interactive flags where needed (e.g. \`--yes\`, \`-y\`) to avoid blocking prompts. Set \`run_in_background=true\` for long-running processes (dev servers, watchers) — returns a process ID immediately.\n` +
+      `- **find** / **ls**: Discover project structure and orient in unfamiliar directories.\n` +
       `- **grep**: Find usages, definitions, and imports across the codebase. Use to understand how code connects.\n` +
-      `- **ls**: Understand project layout at a glance. Good for orienting in unfamiliar directories.\n` +
       `- **web_fetch**: Read documentation, check live endpoints, fetch external resources.\n` +
       `- **task_output**: Read output from a background process by ID. Returns new output since last read (incremental). Use \`from_start=true\` to read from the beginning.\n` +
       `- **task_stop**: Stop a background process by ID. Sends SIGTERM, then SIGKILL after 5 seconds.\n` +
@@ -126,24 +151,25 @@ export async function buildSystemPrompt(
       `  - **Only spawn when**: (1) You need 2+ independent tasks running in PARALLEL. (2) The research requires 5+ tool calls across many files and would bloat your context.\n` +
       `  - **Never spawn when**: You can do it yourself in 1-3 tool calls, you need the result for your very next edit, or you already have the relevant files in context.\n` +
       `  - **Built-in agents**: \`explore\` (read-only search, cheapest model), \`plan\` (architecture/planning, read-only), \`worker\` (full capability), \`fork\` (isolated parallel execution).\n` +
-      `- **tasks**: Manage the project task pane (Shift+\`). Actions: \`add\` (title + prompt required), \`list\`, \`done\` (id required), \`remove\` (id required). Proactively add tasks when you notice issues while working.\n` +
+      `- **tasks**: Manage the project task pane (Shift+\`). Actions: \`add\` (title + prompt required), \`list\`, \`done\` (id required), \`remove\` (id required). Only create tasks when the user explicitly asks you to. After creating tasks, STOP and tell the user to press **Shift+\\\`** to open the Tasks Pane, then press **R** to run all. Do NOT start executing tasks on your own.\n` +
       `  - **title**: Short label (~10 words max) shown in the task pane.\n` +
       `  - **prompt**: Standalone instruction sent to an agent with NO prior context. The agent must complete it from the prompt alone, so include specific file paths, what to change, and enough context to act without ambiguity. Be as long as needed for clarity, but no longer. If the task requires latest docs or APIs, tell the agent to research/fetch them.\n` +
       `  - **Ordering**: When creating multiple tasks (e.g. from a PRD or spec), add them in correct dependency order — foundational work first (types, schemas, config), then core logic, then integration, then UI, then tests. Each task should be completable independently given that prior tasks are done. Think like an engineer planning a project: what must exist before the next piece can be built?\n` +
-      `- **mcp__grep__searchGitHub**: Search real-world code across 1M+ public GitHub repos. Use to verify your implementation against production patterns — check correct API usage, library idioms, and common conventions before finalizing changes. Search for literal code patterns (e.g. \`StreamableHTTPClientTransport(\`, \`useEffect(() =>\`), not keywords.`,
+      `- **skill**: Invoke a skill by name to get specialized instructions for a task. Skills are defined in \`.gg/skills/\` as markdown files. Use this tool when a task matches an available skill.\n` +
+      `- **mcp__grep__searchGitHub**: Search real-world code across 1M+ public GitHub repos. Use to verify your implementation against production patterns — check correct API usage, library idioms, and common conventions before finalizing changes. Search for literal code patterns (e.g. \`StreamableHTTPClientTransport(\`, \`useEffect(() =>\`), not keywords.\n` +
+      `- **enter_plan**: For complex multi-file tasks, call enter_plan to switch to plan mode for safe read-only exploration and planning.\n` +
+      `- **exit_plan**: Submit your plan for user review and exit plan mode.`,
   );
 
   // 5. Avoid
   sections.push(
     `## Avoid\n\n` +
       `- Don't assume changes worked without verifying.\n` +
-      `- Don't make multiple unrelated changes at once.\n` +
       `- Don't generate stubs or placeholder implementations unless asked.\n` +
       `- Don't add TODOs for yourself — finish the work or state what's incomplete.\n` +
       `- Don't pad responses with filler or repeat back what the user said.\n` +
       `- Don't spawn a sub-agent for something you can do yourself. Try grep/find/read FIRST — if that works, you didn't need an agent. Agents are ONLY for parallel execution or 5+ tool-call research tasks.\n` +
-      `- Don't guess or make up file paths, function names, API methods, or library features. If you're unsure, use \`find\`, \`grep\`, or \`web_fetch\` to verify before acting.\n` +
-      `- Don't hallucinate CLI flags, config options, or package versions — check docs or run \`--help\` first.`,
+      `- Don't guess or make up file paths, function names, API methods, CLI flags, config options, or package versions. If unsure, use \`find\`, \`grep\`, \`web_fetch\`, or \`--help\` to verify.`,
   );
 
   // 6. Response Format
@@ -190,21 +216,6 @@ export async function buildSystemPrompt(
   sections.push(
     `## Environment\n\n` + `- Working directory: ${cwd}\n` + `- Platform: ${process.platform}`,
   );
-
-  // 10. Plan mode — injected only when active
-  if (planModeState === "planning") {
-    sections.push(PLAN_MODE_SYSTEM_PROMPT);
-  }
-
-  // Plan mode critical reminder — trailing reinforcement after all other sections
-  if (planModeState === "planning") {
-    sections.push(
-      `<!-- plan-mode-reminder -->\n` +
-        `CRITICAL REMINDER: Plan mode is ACTIVE. Do NOT write/edit files. ` +
-        `Use exit_plan_mode to present your plan for user approval. ` +
-        `Do NOT use ask_user_question to ask about plan approval.`,
-    );
-  }
 
   // Dynamic section (uncached) — separated by marker so the transform layer
   // can split the system prompt into cached + uncached blocks.

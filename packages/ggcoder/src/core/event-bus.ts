@@ -35,6 +35,9 @@ export interface BusEventMap {
   compaction_start: { messageCount: number };
   compaction_end: { originalCount: number; newCount: number };
 
+  // Branch events
+  branch_created: { leafId: string; messagesKept: number };
+
   // Input events
   user_input: { content: string };
   slash_command: { name: string; args: string };
@@ -75,6 +78,14 @@ export class EventBus {
       handler(payload);
     };
     return this.on(event, wrapper);
+  }
+
+  /** Remove all listeners, freeing closures that may retain large scopes. */
+  removeAllListeners(): void {
+    for (const set of this.listeners.values()) {
+      set.clear();
+    }
+    this.listeners.clear();
   }
 
   forwardAgentEvent(event: AgentEvent): void {

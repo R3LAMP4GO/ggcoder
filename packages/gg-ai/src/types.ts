@@ -243,4 +243,8 @@ export interface StreamOptions {
   /** Enable server-side compaction (Anthropic only, beta). Automatically
    *  summarizes earlier context when approaching the context window limit. */
   compaction?: boolean;
+  /** Custom fetch implementation. Useful in non-Node environments (e.g. Expo/React Native)
+   *  where the default `globalThis.fetch` doesn't support streaming properly.
+   *  Passed directly to the underlying provider SDK. */
+  fetch?: typeof globalThis.fetch;
 }

@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
@@ -89,6 +91,19 @@ export interface SessionInfo {
   messageCount: number;
 }
 
+// ── Branch Info ───────────────────────────────────────────
+
+export interface BranchInfo {
+  /** The entry ID where this branch diverges from its parent branch */
+  branchPointId: string;
+  /** The leaf (tip) entry ID of this branch */
+  leafId: string;
+  /** Number of entries in this branch after the branch point */
+  entryCount: number;
+  /** Timestamp of the first entry in the branch */
+  timestamp: string;
+}
+
 // ── Session Manager ────────────────────────────────────────
 
 function encodeCwd(cwd: string): string {
@@ -142,41 +157,51 @@ export class SessionManager {
     header: SessionHeader;
     entries: SessionEntry[];
   }> {
-    const content = await fs.readFile(sessionPath, "utf-8");
-    const lines = content.trim().split("\n").filter(Boolean);
-
+    // Stream the JSONL file line-by-line instead of loading the entire
+    // file into memory. For large sessions (100MB+) this avoids holding
+    // the raw string, the split array, and the parsed objects all at once.
     let header: SessionHeader | null = null;
     const entries: SessionEntry[] = [];
 
-    for (const line of lines) {
-      const parsed = JSON.parse(line) as SessionLine;
-      if (parsed.type === "session") {
-        if ((parsed as SessionHeader).version === 2) {
-          header = parsed as SessionHeader;
+    const rl = createInterface({
+      input: createReadStream(sessionPath, { encoding: "utf-8" }),
+      crlfDelay: Infinity,
+    });
+
+    for await (const line of rl) {
+      if (!line) continue;
+      try {
+        const parsed = JSON.parse(line) as SessionLine;
+        if (parsed.type === "session") {
+          if ((parsed as SessionHeader).version === 2) {
+            header = parsed as SessionHeader;
+          } else {
+            // Upgrade v1 to v2
+            const v1 = parsed as SessionHeaderV1;
+            header = {
+              type: "session",
+              version: 2,
+              id: v1.id,
+              timestamp: v1.timestamp,
+              cwd: v1.cwd,
+              provider: v1.provider,
+              model: v1.model,
+              leafId: null,
+            };
+          }
+        } else if (parsed.type === "message") {
+          // v1 compat: entries without id/parentId
+          const entry = parsed as SessionEntry;
+          if (!entry.id) {
+            (entry as MessageEntry).id = crypto.randomUUID();
+            (entry as MessageEntry).parentId = null;
+          }
+          entries.push(entry);
         } else {
-          // Upgrade v1 to v2
-          const v1 = parsed as SessionHeaderV1;
-          header = {
-            type: "session",
-            version: 2,
-            id: v1.id,
-            timestamp: v1.timestamp,
-            cwd: v1.cwd,
-            provider: v1.provider,
-            model: v1.model,
-            leafId: null,
-          };
+          entries.push(parsed as SessionEntry);
         }
-      } else if (parsed.type === "message") {
-        // v1 compat: entries without id/parentId
-        const entry = parsed as SessionEntry;
-        if (!entry.id) {
-          (entry as MessageEntry).id = crypto.randomUUID();
-          (entry as MessageEntry).parentId = null;
-        }
-        entries.push(entry);
-      } else {
-        entries.push(parsed as SessionEntry);
+      } catch {
+        // Skip malformed JSON lines — a corrupt line shouldn't crash the session
       }
     }
 
@@ -204,20 +229,31 @@ export class SessionManager {
       const filePath = path.join(dir, file);
 
       try {
-        const content = await fs.readFile(filePath, "utf-8");
-        const lines = content.trim().split("\n").filter(Boolean);
-        if (lines.length === 0) continue;
+        // Stream line-by-line to avoid loading entire file for listing
+        const rl = createInterface({
+          input: createReadStream(filePath, { encoding: "utf-8" }),
+          crlfDelay: Infinity,
+        });
 
-        const first = JSON.parse(lines[0]) as SessionLine;
-        if (first.type !== "session") continue;
+        let first: SessionLine | null = null;
+        let messageCount = 0;
 
-        const messageCount = lines.filter((l) => {
+        for await (const line of rl) {
+          if (!line) continue;
           try {
-            return (JSON.parse(l) as SessionLine).type === "message";
+            const parsed = JSON.parse(line) as SessionLine;
+            if (!first) {
+              if (parsed.type !== "session") break;
+              first = parsed;
+            } else if (parsed.type === "message") {
+              messageCount++;
+            }
           } catch {
-            return false;
+            // Skip malformed lines
           }
-        }).length;
+        }
+
+        if (!first || first.type !== "session") continue;
 
         sessions.push({
           id: first.id,
@@ -246,20 +282,49 @@ export class SessionManager {
   }
 
   async updateLeaf(sessionPath: string, leafId: string): Promise<void> {
-    const content = await fs.readFile(sessionPath, "utf-8");
-    const lines = content.trim().split("\n");
-    if (lines.length === 0) return;
+    // Read only the first line (the header) instead of loading the entire file.
+    // For large session files (100MB+), this avoids a full file read+write.
+    const fd = await fs.open(sessionPath, "r+");
+    try {
+      // Read enough bytes to cover the header line (typically <500 bytes)
+      const buf = Buffer.alloc(4096);
+      const { bytesRead } = await fd.read(buf, 0, 4096, 0);
+      const chunk = buf.toString("utf-8", 0, bytesRead);
+      const newlineIdx = chunk.indexOf("\n");
+      if (newlineIdx === -1) return;
 
-    const header = JSON.parse(lines[0]) as SessionLine;
-    if (header.type === "session") {
+      const headerLine = chunk.slice(0, newlineIdx);
+      const header = JSON.parse(headerLine) as SessionLine;
+      if (header.type !== "session") return;
+
       (header as SessionHeader).leafId = leafId;
-      lines[0] = JSON.stringify(header);
-      await fs.writeFile(sessionPath, lines.join("\n") + "\n", "utf-8");
+      const newHeaderLine = JSON.stringify(header);
+
+      if (newHeaderLine.length === headerLine.length) {
+        // Same length — overwrite in place (fast path)
+        await fd.write(newHeaderLine, 0, "utf-8");
+      } else {
+        // Different length — must rewrite the file (rare: only on first leafId set)
+        await fd.close();
+        const content = await fs.readFile(sessionPath, "utf-8");
+        const firstNewline = content.indexOf("\n");
+        await fs.writeFile(sessionPath, newHeaderLine + content.slice(firstNewline), "utf-8");
+        return;
+      }
+    } finally {
+      // fd.close() may have already been called in the else branch above,
+      // but calling it again on a closed handle is a no-op in Node >= 20.
+      await fd.close().catch(() => {});
     }
   }
 
-  getMessages(entries: SessionEntry[]): Message[] {
-    const messages = entries
+  /**
+   * Get messages for the current branch. If leafId is set, walks the
+   * DAG from leaf to root. Otherwise returns all entries linearly.
+   */
+  getMessages(entries: SessionEntry[], leafId?: string | null): Message[] {
+    const branch = leafId ? this.getBranch(entries, leafId) : entries;
+    const messages = branch
       .filter((e): e is MessageEntry => e.type === "message")
       .map((e) => e.message)
       .filter((m) => m.role !== "system");
@@ -328,20 +393,82 @@ export class SessionManager {
     return repaired;
   }
 
-  getBranch(entries: SessionEntry[], leafId: string | null): SessionEntry[] {
+  /**
+   * Build a lookup Map from entry id → entry. Reusable across multiple
+   * getBranch / listBranches calls on the same entry set.
+   */
+  private buildIndex(entries: SessionEntry[]): Map<string, SessionEntry> {
+    return new Map(entries.map((e) => [e.id, e]));
+  }
+
+  /**
+   * Walk the DAG from a leaf entry back to the root, returning entries
+   * in chronological order (root → leaf). This is the "branch" — the
+   * path through the conversation tree that leads to the given leaf.
+   *
+   * Accepts an optional pre-built index to avoid redundant Map allocations
+   * when called in a loop.
+   */
+  getBranch(
+    entries: SessionEntry[],
+    leafId: string | null,
+    byId?: Map<string, SessionEntry>,
+  ): SessionEntry[] {
     if (!leafId) return entries;
 
-    const byId = new Map(entries.map((e) => [e.id, e]));
+    const index = byId ?? this.buildIndex(entries);
     const branch: SessionEntry[] = [];
     let current = leafId;
 
     while (current) {
-      const entry = byId.get(current);
+      const entry = index.get(current);
       if (!entry) break;
       branch.push(entry);
       current = entry.parentId!;
     }
 
     return branch.reverse();
+  }
+
+  /**
+   * List all branches (leaf nodes) in a session's entry DAG.
+   * A leaf is any entry whose id is not referenced as a parentId by any other entry.
+   */
+  listBranches(entries: SessionEntry[]): BranchInfo[] {
+    if (entries.length === 0) return [];
+
+    // Build shared index once — reused by every getBranch call below
+    const byId = this.buildIndex(entries);
+
+    // Find all ids that are referenced as parentId
+    const parentIds = new Set(entries.map((e) => e.parentId).filter(Boolean));
+
+    // Leaves = entries whose id is NOT in parentIds
+    const leaves = entries.filter((e) => !parentIds.has(e.id));
+
+    // Build childCount once — was previously rebuilt per-leaf (O(n²))
+    const childCount = new Map<string | null, number>();
+    for (const e of entries) {
+      childCount.set(e.parentId, (childCount.get(e.parentId) ?? 0) + 1);
+    }
+
+    return leaves.map((leaf) => {
+      const branch = this.getBranch(entries, leaf.id, byId);
+
+      let branchPointId = branch[0]?.id ?? leaf.id;
+      for (const e of branch) {
+        if ((childCount.get(e.parentId) ?? 0) > 1) {
+          branchPointId = e.id;
+          break;
+        }
+      }
+
+      return {
+        branchPointId,
+        leafId: leaf.id,
+        entryCount: branch.length,
+        timestamp: branch[0]?.timestamp ?? leaf.timestamp,
+      };
+    });
   }
 }

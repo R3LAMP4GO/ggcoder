@@ -1,11 +1,10 @@
-import fs from "node:fs/promises";
 import readline from "node:readline";
-import { createReadStream } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { resolvePath } from "./path-utils.js";
 import { BINARY_EXTENSIONS } from "./read.js";
+import { localOperations, type ToolOperations } from "./operations.js";
 
 const GrepParams = z.object({
   pattern: z.string().describe("Search pattern (regex supported)"),
@@ -23,7 +22,10 @@ const GrepParams = z.object({
 const DEFAULT_MAX_RESULTS = 50;
 const MAX_LINE_LENGTH = 500;
 
-export function createGrepTool(cwd: string): AgentTool<typeof GrepParams> {
+export function createGrepTool(
+  cwd: string,
+  ops: ToolOperations = localOperations,
+): AgentTool<typeof GrepParams> {
   return {
     name: "grep",
     description:
@@ -43,9 +45,9 @@ export function createGrepTool(cwd: string): AgentTool<typeof GrepParams> {
       }
 
       // Check if dir is a file
-      const stat = await fs.stat(dir);
+      const stat = await ops.stat(dir);
       if (stat.isFile()) {
-        const results = await searchFile(dir, regex, cwd, maxResults);
+        const results = await searchFile(dir, regex, cwd, maxResults, ops);
         return formatResults(results, maxResults);
       }
 
@@ -67,7 +69,13 @@ export function createGrepTool(cwd: string): AgentTool<typeof GrepParams> {
         if (BINARY_EXTENSIONS.has(ext)) continue;
 
         const filePath = path.join(dir, entry);
-        const fileResults = await searchFile(filePath, regex, cwd, maxResults - results.length);
+        const fileResults = await searchFile(
+          filePath,
+          regex,
+          cwd,
+          maxResults - results.length,
+          ops,
+        );
         results.push(...fileResults);
       }
 
@@ -81,11 +89,12 @@ async function searchFile(
   regex: RegExp,
   cwd: string,
   maxResults: number,
+  ops: ToolOperations,
 ): Promise<string[]> {
   const results: string[] = [];
   const relPath = path.relative(cwd, filePath);
 
-  const stream = createReadStream(filePath, { encoding: "utf-8" });
+  const stream = ops.createReadStream(filePath, "utf-8");
   try {
     const rl = readline.createInterface({
       input: stream,

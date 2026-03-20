@@ -1,6 +1,6 @@
 // Core
 export { Agent, AgentStream } from "./agent.js";
-export { agentLoop, isContextOverflow } from "./agent-loop.js";
+export { agentLoop, isAbortError, isContextOverflow, isBillingError } from "./agent-loop.js";
 
 // Types
 export type {
@@ -15,6 +15,7 @@ export type {
   AgentToolCallEndEvent,
   AgentServerToolCallEvent,
   AgentServerToolResultEvent,
+  AgentSteeringMessageEvent,
   AgentTurnEndEvent,
   AgentDoneEvent,
   AgentErrorEvent,

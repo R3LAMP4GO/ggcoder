@@ -1,22 +1,25 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { resolvePath } from "./path-utils.js";
+import { localOperations, type ToolOperations } from "./operations.js";
 
 const LsParams = z.object({
   path: z.string().optional().describe("Directory path (defaults to cwd)"),
   all: z.boolean().optional().describe("Show hidden files (default: false)"),
 });
 
-export function createLsTool(cwd: string): AgentTool<typeof LsParams> {
+export function createLsTool(
+  cwd: string,
+  ops: ToolOperations = localOperations,
+): AgentTool<typeof LsParams> {
   return {
     name: "ls",
     description: "List directory contents with file types and sizes. Directories listed first.",
     parameters: LsParams,
     async execute({ path: dirPath, all }) {
       const resolved = dirPath ? resolvePath(cwd, dirPath) : cwd;
-      const entries = await fs.readdir(resolved, { withFileTypes: true });
+      const entries = await ops.readdir(resolved, { withFileTypes: true });
 
       // Filter hidden files unless --all
       const filtered = all ? entries : entries.filter((e) => !e.name.startsWith("."));
@@ -37,7 +40,7 @@ export function createLsTool(cwd: string): AgentTool<typeof LsParams> {
 
       for (const file of files) {
         try {
-          const stat = await fs.stat(path.join(resolved, file.name));
+          const stat = await ops.stat(path.join(resolved, file.name));
           const size = formatSize(stat.size);
           const type = file.isSymbolicLink() ? "l" : "f";
           lines.push(`${type}  ${size.padStart(8)}  ${file.name}`);

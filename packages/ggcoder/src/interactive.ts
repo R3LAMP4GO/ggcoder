@@ -21,19 +21,34 @@ import {
 } from "./utils/format.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { ensureAppDirs } from "./config.js";
+import { discoverSkills } from "./core/skills.js";
+import path from "node:path";
+import fs from "node:fs/promises";
+import { shouldCompact, compact } from "./core/compaction/compactor.js";
+import { getContextWindow } from "./core/model-registry.js";
 
 export async function runInteractive(config: CliConfig): Promise<void> {
   const { provider, model, cwd } = config;
 
-  // Build system prompt
-  const systemPrompt = config.systemPrompt ?? (await buildSystemPrompt(cwd));
+  // Load auth & ensure dirs
+  const paths = await ensureAppDirs();
+
+  // Ensure project-local .gg directories exist
+  const localGGDir = path.join(cwd, ".gg");
+  await fs.mkdir(path.join(localGGDir, "skills"), { recursive: true });
+  await fs.mkdir(path.join(localGGDir, "commands"), { recursive: true });
+  await fs.mkdir(path.join(localGGDir, "agents"), { recursive: true });
+
+  // Discover skills & build system prompt
+  const skills = await discoverSkills({
+    globalSkillsDir: paths.skillsDir,
+    projectDir: cwd,
+  });
+  const systemPrompt = config.systemPrompt ?? (await buildSystemPrompt(cwd, skills));
 
   // Create tools
-  const { tools, processManager } = createTools(cwd);
+  const { tools, processManager } = createTools(cwd, { skills });
   process.on("exit", () => processManager.shutdownAll());
-
-  // Load auth
-  const paths = await ensureAppDirs();
   const authStorage = new AuthStorage(paths.authFile);
   await authStorage.load();
 
@@ -68,6 +83,24 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   } else {
     messages.push({ role: "system", content: systemPrompt });
     session = await createSession(cwd, provider, model);
+  }
+
+  // Auto-compact on load if the restored session exceeds the context window.
+  // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
+  if (messages.length > 1) {
+    const contextWindow = getContextWindow(model);
+    if (shouldCompact(messages, contextWindow, 0.8)) {
+      stdout.write("Compacting restored session...\n");
+      const creds = await authStorage.resolveCredentials(provider);
+      const compacted = await compact(messages, {
+        provider,
+        model,
+        apiKey: creds.accessToken,
+        contextWindow,
+      });
+      messages.length = 0;
+      messages.push(...compacted.messages);
+    }
   }
 
   // Welcome banner

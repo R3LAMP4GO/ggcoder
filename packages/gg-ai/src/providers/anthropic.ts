@@ -62,7 +62,9 @@ async function runStream(options: StreamOptions, result: StreamResult): Promise<
   let outputConfig: Record<string, unknown> | undefined;
 
   if (options.thinking) {
-    const t = toAnthropicThinking(options.thinking, maxTokens, options.model);
+    // OAuth proxy doesn't support adaptive thinking or output_config yet —
+    // fall back to budget-based thinking for OAuth tokens
+    const t = toAnthropicThinking(options.thinking, maxTokens, options.model, isOAuth);
     thinking = t.thinking;
     maxTokens = t.maxTokens;
     if (t.outputConfig) {

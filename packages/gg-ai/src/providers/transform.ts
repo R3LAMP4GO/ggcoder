@@ -221,12 +221,13 @@ export function toAnthropicThinking(
   level: ThinkingLevel,
   maxTokens: number,
   model: string,
+  forcebudget?: boolean,
 ): {
   thinking: Anthropic.ThinkingConfigParam;
   maxTokens: number;
   outputConfig?: { effort: string };
 } {
-  if (supportsAdaptiveThinking(model)) {
+  if (supportsAdaptiveThinking(model) && !forcebudget) {
     // Adaptive thinking — model decides when/how much to think.
     // budget_tokens is deprecated on Opus 4.6 / Sonnet 4.6.
     // "max" effort is Opus-only; downgrade to "high" for Sonnet
@@ -241,7 +242,7 @@ export function toAnthropicThinking(
     };
   }
 
-  // Legacy budget-based thinking for older models ("max" treated as "high")
+  // Budget-based thinking — used for older models and OAuth (proxy doesn't support adaptive yet)
   const effectiveLevel = level === "max" ? "high" : level;
   const budgetMap: Record<"low" | "medium" | "high", number> = {
     low: Math.max(1024, Math.floor(maxTokens * 0.25)),

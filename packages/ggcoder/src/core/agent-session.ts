@@ -139,6 +139,8 @@ export class AgentSession {
       skills: this.skills,
       provider: this.provider,
       model: this.model,
+      subagentModel: this.settingsManager?.get("subagentModel"),
+      exploreModel: this.settingsManager?.get("exploreModel"),
     });
     this.tools = tools;
     this.processManager = processManager;

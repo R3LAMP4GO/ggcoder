@@ -10,6 +10,9 @@ const SUB_AGENT_MAX_OUTPUT_CHARS = 100_000; // ~25k tokens, matches other tool l
 const SUB_AGENT_MAX_OUTPUT_LINES = 500;
 const SUB_AGENT_MAX_STDERR_CHARS = 10_000; // Cap stderr to prevent unbounded growth
 
+/** Tools that are read-only — agents with ONLY these tools are explore-type. */
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "web_fetch"]);
+
 const SubAgentParams = z.object({
   task: z.string().describe("The task to delegate to the sub-agent"),
   agent: z
@@ -36,6 +39,8 @@ export function createSubAgentTool(
   parentProvider: string,
   parentModel: string,
   planModeRef?: { current: boolean },
+  subagentModel?: string,
+  exploreModel?: string,
 ): AgentTool<typeof SubAgentParams> {
   const agentList = agents.map((a) => `- ${a.name}: ${a.description}`).join("\n");
   const agentDesc = agentList
@@ -68,13 +73,28 @@ export function createSubAgentTool(
 
       const useProvider = parentProvider;
 
+      // Resolve model: agent def override > explore/subagent setting > parent fallback
+      let useModel = parentModel;
+      if (agentDef?.model) {
+        useModel = agentDef.model;
+      } else if (
+        agentDef &&
+        agentDef.tools.length > 0 &&
+        agentDef.tools.every((t) => READ_ONLY_TOOLS.has(t)) &&
+        exploreModel
+      ) {
+        useModel = exploreModel;
+      } else if (subagentModel) {
+        useModel = subagentModel;
+      }
+
       // Build CLI args — limit turns to prevent runaway context growth
       const cliArgs: string[] = [
         "--json",
         "--provider",
         useProvider,
         "--model",
-        parentModel,
+        useModel,
         "--max-turns",
         String(SUB_AGENT_MAX_TURNS),
       ];

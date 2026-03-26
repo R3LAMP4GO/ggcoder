@@ -328,12 +328,16 @@ function main(): void {
   // Load saved settings for model/provider persistence
   let savedProvider: "anthropic" | "openai" | "glm" | "moonshot" | undefined;
   let savedModel: string | undefined;
+  let savedSubagentModel: string | undefined;
+  let savedExploreModel: string | undefined;
   let savedThinkingEnabled = false;
   let savedTheme: "auto" | "dark" | "light" = "auto";
   try {
     const raw = JSON.parse(fs.readFileSync(getAppPaths().settingsFile, "utf-8"));
     if (raw.defaultProvider) savedProvider = raw.defaultProvider;
     if (raw.defaultModel) savedModel = raw.defaultModel;
+    if (raw.subagentModel) savedSubagentModel = raw.subagentModel;
+    if (raw.exploreModel) savedExploreModel = raw.exploreModel;
     if (raw.thinkingEnabled === true) savedThinkingEnabled = true;
     if (raw.theme === "dark" || raw.theme === "light" || raw.theme === "auto")
       savedTheme = raw.theme;
@@ -364,6 +368,8 @@ function main(): void {
     thinkingLevel,
     continueRecent,
     theme: savedTheme,
+    subagentModel: savedSubagentModel,
+    exploreModel: savedExploreModel,
   }).catch((err) => {
     log("ERROR", "fatal", err instanceof Error ? err.message : String(err));
     closeLogger();
@@ -382,6 +388,8 @@ async function runInkTUI(opts: {
   continueRecent?: boolean;
   resumeSessionPath?: string;
   theme?: "auto" | "dark" | "light";
+  subagentModel?: string;
+  exploreModel?: string;
 }): Promise<void> {
   const { provider, model, cwd } = opts;
 
@@ -455,6 +463,8 @@ async function runInkTUI(opts: {
     skills,
     provider,
     model,
+    subagentModel: opts.subagentModel,
+    exploreModel: opts.exploreModel,
     planModeRef,
     onEnterPlan: (reason) => onEnterPlanRef.current(reason),
     onExitPlan: (planPath) => onExitPlanRef.current(planPath),

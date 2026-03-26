@@ -7,6 +7,7 @@ export interface AgentDefinition {
   tools: string[];
   systemPrompt: string;
   source: "global" | "project";
+  model?: string;
 }
 
 /**
@@ -80,6 +81,7 @@ export function parseAgentFile(raw: string, source: "global" | "project"): Agent
   let name = "";
   let description = "";
   let tools: string[] = [];
+  let model: string | undefined;
   let systemPrompt = raw;
 
   if (raw.startsWith("---")) {
@@ -96,6 +98,7 @@ export function parseAgentFile(raw: string, source: "global" | "project"): Agent
 
         if (key === "name") name = value;
         else if (key === "description") description = value;
+        else if (key === "model") model = value;
         else if (key === "tools") {
           tools = value
             .split(",")
@@ -106,5 +109,5 @@ export function parseAgentFile(raw: string, source: "global" | "project"): Agent
     }
   }
 
-  return { name, description, tools, systemPrompt, source };
+  return { name, description, tools, systemPrompt, source, model };
 }

@@ -26,6 +26,10 @@ export interface CreateToolsOptions {
   model?: string;
   /** Custom I/O operations for remote execution (SSH, Docker, etc.). Defaults to local filesystem. */
   operations?: ToolOperations;
+  /** Model override for worker subagents (default: parent model). */
+  subagentModel?: string;
+  /** Model override for explore/read-only subagents (default: parent model). */
+  exploreModel?: string;
   /** Ref for checking plan mode state inside tool execute functions. */
   planModeRef?: { current: boolean };
   /** Callback when the LLM enters plan mode. */
@@ -60,7 +64,17 @@ export function createTools(cwd: string, opts?: CreateToolsOptions): CreateTools
   ];
 
   if (opts?.agents && opts.agents.length > 0 && opts.provider && opts.model) {
-    tools.push(createSubAgentTool(cwd, opts.agents, opts.provider, opts.model, planModeRef));
+    tools.push(
+      createSubAgentTool(
+        cwd,
+        opts.agents,
+        opts.provider,
+        opts.model,
+        planModeRef,
+        opts.subagentModel,
+        opts.exploreModel,
+      ),
+    );
   }
 
   if (opts?.skills && opts.skills.length > 0) {

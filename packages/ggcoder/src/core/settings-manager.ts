@@ -16,6 +16,8 @@ const SettingsSchema = z.object({
   showTokenUsage: z.boolean().default(true),
   showThinking: z.boolean().default(true),
   enabledTools: z.array(z.string()).optional(),
+  subagentModel: z.string().optional(),
+  exploreModel: z.string().optional(),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
